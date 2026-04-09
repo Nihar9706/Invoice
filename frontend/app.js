@@ -1,0 +1,971 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   Invoice Finance DApp — Frontend Logic (ERC-4337 Account Abstraction)
+   ═══════════════════════════════════════════════════════════════════════════
+   
+   All contract-mutating operations go through the ERC-4337 AA flow:
+     Frontend → Bundler Relay → Bundler Contract → EntryPoint → SmartWallet → InvoiceContract
+   
+   Only ETH deposits use MetaMask directly (payable calls require ETH transfer).
+   Everything else is GASLESS with ZERO MetaMask popups.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+// ─── Globals ──────────────────────────────────────────────────────────────────
+let provider, readProvider, signer, connectedAddr;
+let invoiceContract, invoiceReadContract, paymasterContract, paymasterReadContract;
+let autoKeeperContract, smartWalletContract;
+let CONFIG     = null;
+let ROLE       = null;
+let userSmartWallet = null;   // SmartWallet address for the connected user
+let allInvoices = [];
+let _refreshTimer = null;
+
+// ─── ABIs ─────────────────────────────────────────────────────────────────────
+const INVOICE_ABI = [
+  "function uploadInvoice(address buyer, uint256 amount, uint256 dueDate) external",
+  "function approveByBuyer(uint256 id) external",
+  "function depositEscrow(uint256 id) external payable",
+  "function escrowFromDeposit(uint256 id) external",
+  "function fundInvoice(uint256 id) external",
+  "function releaseDueDatePayment(uint256 id) external",
+  "function setBuyerCondition(uint256 maxAmount, address allowedSupplier) external",
+  "function setFinancierCondition(uint256 maxAmount, address allowedBuyer) external",
+  "function depositFunds() external payable",
+  "function depositFor(address beneficiary) external payable",
+  "function withdrawFunds(uint256 amount) external",
+  "function invoices(uint256) external view returns (uint256, address, address, uint256, uint256, bool, bool, bool, bool, string, address)",
+  "function counter() external view returns (uint256)",
+  "function deposits(address) external view returns (uint256)",
+  "function buyerConditions(address) external view returns (uint256, address)",
+  "function financierConditions(address) external view returns (uint256, address)",
+
+  "event InvoiceUploaded(uint256 indexed id, address supplier, address buyer, uint256 amount)",
+  "event AutoApproved(uint256 indexed id, string reason)",
+  "event BuyerApproved(uint256 indexed id)",
+  "event EscrowDeposited(uint256 indexed id, uint256 amount)",
+  "event AutoFinanced(uint256 indexed id, address indexed financier, uint256 supplierPayout)",
+  "event Financed(uint256 indexed id, address indexed financier, uint256 supplierPayout)",
+  "event Paid(uint256 indexed id, address indexed financier, uint256 financierPayout)",
+  "event BuyerConditionSet(address indexed buyer, uint256 maxAmount, address allowedSupplier)",
+  "event FinancierConditionSet(address indexed financier, uint256 maxAmount, address allowedBuyer)",
+  "event Deposited(address indexed user, uint256 amount, uint256 newBalance)",
+  "event Withdrawn(address indexed user, uint256 amount, uint256 newBalance)",
+];
+
+const PAYMASTER_ABI = [
+  "function addUser(address user) external",
+  "function removeUser(address user) external",
+  "function validate(address sender) external view returns (bool)",
+  "function allowed(address) external view returns (bool)",
+  "function getDeposit() external view returns (uint256)",
+  "function owner() external view returns (address)",
+];
+
+const AUTOKEEPER_ABI = [
+  "function releaseAll() external",
+  "function checkAndRelease(uint256[] calldata invoiceIds) external",
+];
+
+const SMART_WALLET_ABI = [
+  "function execute(address target, bytes calldata data) external payable",
+  "function owner() external view returns (address)",
+];
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  INIT — Load deployed config
+// ═════════════════════════════════════════════════════════════════════════════
+
+async function loadConfig() {
+  try {
+    const resp = await fetch("deployed.json");
+    if (!resp.ok) throw new Error("deployed.json not found");
+    CONFIG = await resp.json();
+    console.log("✅ Config loaded:", CONFIG);
+    return true;
+  } catch (err) {
+    console.error("❌ Failed to load deployed.json:", err);
+    showToast("Deploy contracts first: npx hardhat run scripts/deploy.js --network localhost", "error");
+    return false;
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  ERC-4337 — Send UserOperation (GASLESS, ZERO MetaMask POPUP)
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Send a UserOperation through the ERC-4337 AA flow.
+ * The bundler-relay server handles signing and on-chain submission.
+ * NO MetaMask popup — completely gasless for the user.
+ *
+ * @param {string} targetAddr - Contract address to call
+ * @param {string} calldata   - ABI-encoded function call data
+ * @returns {object}          - { success, txHash, gasUsed }
+ */
+async function sendUserOp(targetAddr, calldata) {
+  if (!userSmartWallet) {
+    throw new Error("No SmartWallet found for your role. Are you connected with a known address?");
+  }
+
+  const relayUrl = CONFIG.bundlerRelayUrl || "http://localhost:3001";
+
+  const response = await fetch(`${relayUrl}/submit-userop`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      sender:    userSmartWallet,
+      target:    targetAddr,
+      data:      calldata,
+      paymaster: CONFIG.contracts.Paymaster,
+    }),
+  });
+
+  const result = await response.json();
+
+  if (!result.success) {
+    throw new Error(result.error || "UserOp failed");
+  }
+
+  console.log(`✅ UserOp executed via AA — TX: ${result.txHash}, Gas: ${result.gasUsed}`);
+  return result;
+}
+
+/**
+ * Helper: encode a contract function call and send as UserOp
+ */
+async function sendAACall(abi, targetAddr, functionName, args = []) {
+  const iface = new ethers.Interface(abi);
+  const calldata = iface.encodeFunctionData(functionName, args);
+  return sendUserOp(targetAddr, calldata);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  CONNECT WALLET
+// ═════════════════════════════════════════════════════════════════════════════
+
+async function connectWallet() {
+  if (!window.ethereum) {
+    showToast("MetaMask not detected! Install MetaMask extension.", "error");
+    return;
+  }
+
+  const ok = await loadConfig();
+  if (!ok) return;
+
+  try {
+    const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
+    connectedAddr = accounts[0].toLowerCase();
+
+    // Direct JSON-RPC provider for READ calls — bypasses MetaMask cache entirely
+    readProvider = new ethers.JsonRpcProvider(CONFIG.rpcUrl);
+
+    provider = new ethers.BrowserProvider(window.ethereum);
+    signer   = await provider.getSigner();
+
+    // We MUST check MetaMask's active chain, not the direct node's chain
+    const network = await provider.getNetwork();
+    const chainId = Number(network.chainId);
+
+    if (chainId !== CONFIG.chainId) {
+      await switchToHardhat();
+      return;
+    }
+
+    // Read contracts — use readProvider (no MetaMask cache issues)
+    invoiceReadContract  = new ethers.Contract(CONFIG.contracts.InvoiceContract, INVOICE_ABI, readProvider);
+    paymasterReadContract = new ethers.Contract(CONFIG.contracts.Paymaster, PAYMASTER_ABI, readProvider);
+
+    // Write contracts — use signer (for direct payable calls)
+    invoiceContract    = new ethers.Contract(CONFIG.contracts.InvoiceContract, INVOICE_ABI, signer);
+    paymasterContract  = new ethers.Contract(CONFIG.contracts.Paymaster, PAYMASTER_ABI, signer);
+    autoKeeperContract = new ethers.Contract(CONFIG.contracts.AutoKeeper, AUTOKEEPER_ABI, signer);
+
+    // Detect role & SmartWallet
+    detectRole();
+
+    // Initialize SmartWallet contract (for payable calls that must go through SmartWallet)
+    if (userSmartWallet) {
+      smartWalletContract = new ethers.Contract(userSmartWallet, SMART_WALLET_ABI, signer);
+    }
+
+    // Check bundler relay health
+    await checkBundlerRelay();
+
+    updateHeader();
+
+    document.getElementById("connectScreen").classList.add("hidden");
+    document.getElementById("dashboard").classList.remove("hidden");
+
+    showRoleSection();
+
+    await refreshInvoices();
+    await loadConditions();
+    await updateDepositBalance();
+    await updateStats();
+
+    setupEventListeners();
+
+    window.ethereum.on("accountsChanged", () => location.reload());
+    window.ethereum.on("chainChanged",   () => location.reload());
+
+    const aaStatus = userSmartWallet ? "🔗 AA Enabled" : "⚠️ No SmartWallet";
+    showToast(`Connected as ${ROLE || "Unknown"}: ${truncAddr(connectedAddr)} | ${aaStatus}`, "success");
+
+  } catch (err) {
+    console.error("Connection failed:", err);
+    showToast("Connection failed: " + (err.message || err), "error");
+  }
+}
+
+async function checkBundlerRelay() {
+  try {
+    const relayUrl = CONFIG.bundlerRelayUrl || "http://localhost:3001";
+    const resp = await fetch(`${relayUrl}/health`);
+    if (resp.ok) {
+      console.log("✅ Bundler relay is running");
+      return true;
+    }
+  } catch (e) {
+    console.warn("⚠️ Bundler relay not reachable at", CONFIG.bundlerRelayUrl);
+    showToast("⚠️ Bundler relay not running! Start it: node scripts/bundler-relay.js", "error");
+  }
+  return false;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  NETWORK SWITCH
+// ═════════════════════════════════════════════════════════════════════════════
+
+async function switchToHardhat() {
+  try {
+    await window.ethereum.request({
+      method: "wallet_switchEthereumChain",
+      params: [{ chainId: "0x" + CONFIG.chainId.toString(16) }],
+    });
+    location.reload();
+  } catch (switchErr) {
+    if (switchErr.code === 4902) {
+      await window.ethereum.request({
+        method: "wallet_addEthereumChain",
+        params: [{
+          chainId:  "0x" + CONFIG.chainId.toString(16),
+          chainName: "Hardhat Local",
+          nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 },
+          rpcUrls: [CONFIG.rpcUrl],
+        }],
+      });
+      location.reload();
+    } else {
+      showToast("Switch to Hardhat Local network (chain ID 31337) in MetaMask", "error");
+    }
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  ROLE DETECTION — maps EOA to SmartWallet
+// ═════════════════════════════════════════════════════════════════════════════
+
+function detectRole() {
+  const addr = connectedAddr.toLowerCase();
+  if (addr === CONFIG.roles.supplier.toLowerCase()) {
+    ROLE = "supplier";
+    userSmartWallet = CONFIG.contracts.SupplierSmartWallet;
+  } else if (addr === CONFIG.roles.buyer.toLowerCase()) {
+    ROLE = "buyer";
+    userSmartWallet = CONFIG.contracts.BuyerSmartWallet;
+  } else if (addr === CONFIG.roles.financier.toLowerCase()) {
+    ROLE = "financier";
+    userSmartWallet = CONFIG.contracts.FinancierSmartWallet;
+  } else if (addr === CONFIG.roles.owner.toLowerCase()) {
+    ROLE = "admin";
+    userSmartWallet = null; // admin uses direct calls
+  } else {
+    ROLE = null;
+    userSmartWallet = null;
+  }
+
+  console.log(`🔑 Role: ${ROLE}, SmartWallet: ${userSmartWallet || "none"}`);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  UI UPDATES
+// ═════════════════════════════════════════════════════════════════════════════
+
+async function updateHeader() {
+  const addrEl = document.getElementById("walletAddr");
+  addrEl.textContent = truncAddr(connectedAddr);
+  addrEl.classList.remove("hidden");
+
+  const balance = await readProvider.getBalance(connectedAddr);
+  const balEl = document.getElementById("ethBalance");
+  balEl.textContent = parseFloat(ethers.formatEther(balance)).toFixed(3) + " ETH";
+  balEl.classList.remove("hidden");
+
+  const netBadge = document.getElementById("networkBadge");
+  netBadge.classList.remove("hidden");
+
+  // AA badge
+  const aaBadge = document.getElementById("aaBadge");
+  if (aaBadge && userSmartWallet) {
+    aaBadge.textContent = "⛓️ ERC-4337";
+    aaBadge.classList.remove("hidden");
+  }
+
+  const roleBadge = document.getElementById("roleBadge");
+  if (ROLE) {
+    roleBadge.textContent = ROLE === "admin" ? "⚙️ Admin" :
+                            ROLE === "supplier" ? "📦 Supplier" :
+                            ROLE === "buyer" ? "🛒 Buyer" : "💰 Financier";
+    roleBadge.className = `role-badge ${ROLE}`;
+    roleBadge.classList.remove("hidden");
+  }
+
+  document.getElementById("connectBtn").textContent = "✅ Connected";
+  document.getElementById("connectBtn").disabled = true;
+}
+
+function showRoleSection() {
+  ["supplierSection", "buyerSection", "financierSection", "unknownSection"].forEach(id => {
+    document.getElementById(id).classList.add("hidden");
+  });
+
+  if (ROLE === "supplier") {
+    document.getElementById("supplierSection").classList.remove("hidden");
+    // Pre-fill with BUYER's SmartWallet address (not EOA!)
+    document.getElementById("invBuyer").value = CONFIG.contracts.BuyerSmartWallet;
+    const d = new Date(Date.now() + 2 * 60 * 1000);
+    document.getElementById("invDueDate").value = d.toISOString().slice(0, 16);
+  } else if (ROLE === "buyer") {
+    document.getElementById("buyerSection").classList.remove("hidden");
+  } else if (ROLE === "financier") {
+    document.getElementById("financierSection").classList.remove("hidden");
+  } else if (ROLE === "admin") {
+    document.getElementById("supplierSection").classList.remove("hidden");
+  } else {
+    document.getElementById("unknownSection").classList.remove("hidden");
+    document.getElementById("expectedAddrs").innerHTML = `
+      Supplier: ${CONFIG.roles.supplier}<br>
+      Buyer: ${CONFIG.roles.buyer}<br>
+      Financier: ${CONFIG.roles.financier}<br>
+      Admin: ${CONFIG.roles.owner}
+    `;
+  }
+
+  document.getElementById("adminTab").classList.toggle("hidden", ROLE !== "admin");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  INVOICE ACTIONS — ALL via ERC-4337 AA (ZERO MetaMask popups)
+// ═════════════════════════════════════════════════════════════════════════════
+
+// ── Upload Invoice (Supplier) — GASLESS via AA ───────────────────────────────
+async function uploadInvoice() {
+   const buyerAddr = document.getElementById("invBuyer").value.trim();
+  const amtStr  = document.getElementById("invAmount").value.trim();
+  const dateStr = document.getElementById("invDueDate").value;
+
+  if (!buyerAddr || !amtStr || !dateStr) {
+    showToast("Fill in all fields", "error");
+    return;
+  }
+
+  // Resolve buyer address: if it matches the Buyer EOA, use their SmartWallet
+  // This ensures deposits[BuyerSmartWallet] and inv.buyer match
+  let resolvedBuyer = buyerAddr;
+  if (buyerAddr.toLowerCase() === CONFIG.roles.buyer.toLowerCase()) {
+    resolvedBuyer = CONFIG.contracts.BuyerSmartWallet;
+  }
+
+  const amount  = ethers.parseEther(amtStr);
+  const dueDate = Math.floor(new Date(dateStr).getTime() / 1000);
+
+  if (dueDate <= Math.floor(Date.now() / 1000)) {
+    showToast("Due date must be in the future", "error");
+    return;
+  }
+
+  const btn = document.getElementById("uploadBtn");
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Uploading via AA...';
+
+  try {
+    const result = await sendAACall(
+      INVOICE_ABI,
+      CONFIG.contracts.InvoiceContract,
+      "uploadInvoice",
+      [resolvedBuyer, amount, dueDate]
+    );
+    showToast(`✅ Invoice uploaded via ERC-4337! TX: ${truncAddr(result.txHash)} (gasless)`, "success");
+    await refreshInvoices();
+  } catch (err) {
+    console.error("Upload failed:", err);
+    showToast("Upload failed: " + parseError(err), "error");
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '📤 Upload Invoice';
+  }
+}
+
+// ── Approve Invoice (Buyer) — GASLESS via AA ─────────────────────────────────
+async function approveInvoice(id) {
+  try {
+    showToast(`⏳ Approving invoice #${id} via AA (gasless)...`, "info");
+    await sendAACall(INVOICE_ABI, CONFIG.contracts.InvoiceContract, "approveByBuyer", [id]);
+    showToast(`✅ Invoice #${id} approved via ERC-4337! (gasless)`, "success");
+    await refreshInvoices();
+    await updateStats();
+  } catch (err) {
+    showToast("Approve failed: " + parseError(err), "error");
+  }
+}
+
+// ── Deposit Escrow (Buyer) — GASLESS via AA using pre-deposited balance ──────
+async function depositEscrow(id) {
+  try {
+    showToast(`⏳ Escrowing invoice #${id} from pre-deposit via AA (gasless)...`, "info");
+    await sendAACall(
+      INVOICE_ABI,
+      CONFIG.contracts.InvoiceContract,
+      "escrowFromDeposit",
+      [id]
+    );
+    showToast(`✅ Escrow locked for invoice #${id} via ERC-4337! (gasless)`, "success");
+    await refreshInvoices();
+    await updateDepositBalance();
+    await updateStats();
+  } catch (err) {
+    showToast("Escrow failed: " + parseError(err), "error");
+  }
+}
+
+// ── Fund Invoice (Financier) — GASLESS via AA ────────────────────────────────
+async function fundInvoice(id) {
+  try {
+    showToast(`⏳ Funding invoice #${id} via AA (gasless)...`, "info");
+    await sendAACall(INVOICE_ABI, CONFIG.contracts.InvoiceContract, "fundInvoice", [id]);
+    showToast(`✅ Invoice #${id} funded via ERC-4337! Supplier received 90%. (gasless)`, "success");
+    await refreshInvoices();
+    await updateStats();
+  } catch (err) {
+    showToast("Fund failed: " + parseError(err), "error");
+  }
+}
+
+// ── Release Due Date Payment — GASLESS via AA ────────────────────────────────
+async function releasePayment(id) {
+  try {
+    showToast(`⏳ Releasing payment for invoice #${id} via AA...`, "info");
+    await sendAACall(INVOICE_ABI, CONFIG.contracts.InvoiceContract, "releaseDueDatePayment", [id]);
+    showToast(`✅ Invoice #${id} paid via ERC-4337! (gasless)`, "success");
+    await refreshInvoices();
+    await updateStats();
+  } catch (err) {
+    showToast("Release failed: " + parseError(err), "error");
+  }
+}
+
+// ── Trigger AutoKeeper — GASLESS via AA ──────────────────────────────────────
+async function triggerKeeper() {
+  try {
+    showToast("🤖 Running AutoKeeper via AA...", "info");
+    await sendAACall(AUTOKEEPER_ABI, CONFIG.contracts.AutoKeeper, "releaseAll", []);
+    showToast("✅ AutoKeeper executed via ERC-4337! (gasless)", "success");
+    await refreshInvoices();
+    await updateStats();
+  } catch (err) {
+    showToast("Keeper failed: " + parseError(err), "error");
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  SET CONDITIONS — GASLESS via AA
+// ═════════════════════════════════════════════════════════════════════════════
+
+async function setBuyerCondition() {
+  const maxAmt   = document.getElementById("buyerMaxAmt").value.trim();
+  const supplier = document.getElementById("buyerAllowedSupplier").value.trim();
+
+  if (!maxAmt) {
+    showToast("Enter max auto-approve amount", "error");
+    return;
+  }
+
+  const amount          = ethers.parseEther(maxAmt);
+  const allowedSupplier = supplier || ethers.ZeroAddress;
+
+  try {
+    showToast("⏳ Setting buyer condition via AA (gasless)...", "info");
+    await sendAACall(
+      INVOICE_ABI,
+      CONFIG.contracts.InvoiceContract,
+      "setBuyerCondition",
+      [amount, allowedSupplier]
+    );
+    showToast(`✅ Condition set via ERC-4337: auto-approve ≤ ${maxAmt} ETH (gasless)`, "success");
+    await loadConditions();
+  } catch (err) {
+    showToast("Failed: " + parseError(err), "error");
+  }
+}
+
+async function setFinancierCondition() {
+  const maxAmt = document.getElementById("finMaxAmt").value.trim();
+  const buyer  = document.getElementById("finAllowedBuyer").value.trim();
+
+  if (!maxAmt) {
+    showToast("Enter max auto-fund amount", "error");
+    return;
+  }
+
+  const amount       = ethers.parseEther(maxAmt);
+  const allowedBuyer = buyer || ethers.ZeroAddress;
+
+  try {
+    showToast("⏳ Setting financier condition via AA (gasless)...", "info");
+    await sendAACall(
+      INVOICE_ABI,
+      CONFIG.contracts.InvoiceContract,
+      "setFinancierCondition",
+      [amount, allowedBuyer]
+    );
+    showToast(`✅ Condition set via ERC-4337: auto-fund ≤ ${maxAmt} ETH (gasless)`, "success");
+    await loadConditions();
+  } catch (err) {
+    showToast("Failed: " + parseError(err), "error");
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  DEPOSIT / WITHDRAW
+//  depositFunds → uses depositFor() via MetaMask (1 popup, ETH transfer needed)
+//  withdrawFunds → GASLESS via AA (no ETH transfer needed)
+// ═════════════════════════════════════════════════════════════════════════════
+
+async function depositFunds() {
+  const amtStr = document.getElementById("depositAmount").value.trim();
+  if (!amtStr || parseFloat(amtStr) <= 0) {
+    showToast("Enter a valid deposit amount", "error");
+    return;
+  }
+
+  try {
+    showToast(`⏳ Depositing ${amtStr} ETH for SmartWallet (1 MetaMask confirm)...`, "info");
+    // Use depositFor to credit the SmartWallet's balance — this is the ONLY MetaMask popup
+    const tx = await invoiceContract.depositFor(userSmartWallet, { value: ethers.parseEther(amtStr) });
+    await tx.wait();
+    showToast(`✅ Deposited ${amtStr} ETH for SmartWallet! Auto-flow is funded.`, "success");
+    document.getElementById("depositAmount").value = "";
+    await updateDepositBalance();
+    await updateHeader();
+  } catch (err) {
+    showToast("Deposit failed: " + parseError(err), "error");
+  }
+}
+
+async function withdrawFunds() {
+  const amtStr = document.getElementById("depositAmount").value.trim();
+  if (!amtStr || parseFloat(amtStr) <= 0) {
+    showToast("Enter a valid withdraw amount", "error");
+    return;
+  }
+
+  try {
+    showToast(`⏳ Withdrawing ${amtStr} ETH via AA (gasless)...`, "info");
+    await sendAACall(
+      INVOICE_ABI,
+      CONFIG.contracts.InvoiceContract,
+      "withdrawFunds",
+      [ethers.parseEther(amtStr)]
+    );
+    showToast(`✅ Withdrew ${amtStr} ETH via ERC-4337! (gasless)`, "success");
+    document.getElementById("depositAmount").value = "";
+    await updateDepositBalance();
+    await updateHeader();
+  } catch (err) {
+    showToast("Withdraw failed: " + parseError(err), "error");
+  }
+}
+
+async function updateDepositBalance() {
+  if (!invoiceReadContract || !userSmartWallet) return;
+  try {
+    // Read deposit balance of the SmartWallet (not the EOA)
+    const bal = await invoiceReadContract.deposits(userSmartWallet);
+    const el = document.getElementById("contractDeposit");
+    if (el) {
+      el.textContent = parseFloat(ethers.formatEther(bal)).toFixed(4) + " ETH";
+    }
+  } catch (err) {
+    console.error("Failed to read deposit balance:", err);
+  }
+}
+
+async function loadConditions() {
+  try {
+    // Buyer condition — indexed by SmartWallet address
+    if (ROLE === "buyer" && userSmartWallet) {
+      const [maxAmt, allowedSupplier] = await invoiceReadContract.buyerConditions(userSmartWallet);
+      const el = document.getElementById("buyerCondStatus");
+      if (maxAmt > 0n) {
+        const supText = allowedSupplier === ethers.ZeroAddress ? "any supplier" : truncAddr(allowedSupplier);
+        el.className = "condition-status active";
+        el.textContent = `✅ Active: auto-approve ≤ ${ethers.formatEther(maxAmt)} ETH from ${supText}`;
+      } else {
+        el.className = "condition-status";
+        el.textContent = "❌ No auto-approve condition set — all invoices need manual approval";
+      }
+    }
+
+    // Financier condition — indexed by SmartWallet address
+    if (ROLE === "financier" && userSmartWallet) {
+      const [maxAmt, allowedBuyer] = await invoiceReadContract.financierConditions(userSmartWallet);
+      const el = document.getElementById("finCondStatus");
+      if (maxAmt > 0n) {
+        const bText = allowedBuyer === ethers.ZeroAddress ? "any buyer" : truncAddr(allowedBuyer);
+        el.className = "condition-status active";
+        el.textContent = `✅ Active: auto-fund ≤ ${ethers.formatEther(maxAmt)} ETH for ${bText}`;
+      } else {
+        el.className = "condition-status";
+        el.textContent = "❌ No auto-fund condition set — all invoices need manual funding";
+      }
+    }
+  } catch (err) {
+    console.error("Load conditions error:", err);
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  ADMIN — direct MetaMask calls (admin doesn't have SmartWallet)
+// ═════════════════════════════════════════════════════════════════════════════
+
+async function adminAddUser() {
+  const addr = document.getElementById("adminWhitelistAddr").value.trim();
+  if (!addr) return showToast("Enter address", "error");
+  try {
+    const tx = await paymasterContract.addUser(addr);
+    await tx.wait();
+    showToast(`✅ ${truncAddr(addr)} whitelisted`, "success");
+    await loadAdminInfo();
+  } catch (err) {
+    showToast("Failed: " + parseError(err), "error");
+  }
+}
+
+async function adminRemoveUser() {
+  const addr = document.getElementById("adminWhitelistAddr").value.trim();
+  if (!addr) return showToast("Enter address", "error");
+  try {
+    const tx = await paymasterContract.removeUser(addr);
+    await tx.wait();
+    showToast(`✅ ${truncAddr(addr)} removed`, "success");
+    await loadAdminInfo();
+  } catch (err) {
+    showToast("Failed: " + parseError(err), "error");
+  }
+}
+
+async function loadAdminInfo() {
+  if (ROLE !== "admin") return;
+  try {
+    const deposit = await paymasterReadContract.getDeposit();
+
+    const supSW = await paymasterReadContract.allowed(CONFIG.contracts.SupplierSmartWallet);
+    const buySW = await paymasterReadContract.allowed(CONFIG.contracts.BuyerSmartWallet);
+    const finSW = await paymasterReadContract.allowed(CONFIG.contracts.FinancierSmartWallet);
+
+    document.getElementById("paymasterInfo").innerHTML = `
+      <div style="display:flex;flex-direction:column;gap:0.75rem;">
+        <div class="condition-status active">
+          💰 Paymaster EntryPoint Deposit: <strong>${ethers.formatEther(deposit)} ETH</strong>
+        </div>
+        <div style="font-size:0.85rem;color:var(--text-secondary);">
+          <p>Contract: <span class="addr">${truncAddr(CONFIG.contracts.Paymaster)}</span></p>
+        </div>
+      </div>
+    `;
+
+    document.getElementById("whitelistStatus").innerHTML = `
+      <div style="font-size:0.85rem;">
+        <p><strong>SmartWallet Whitelist (ERC-4337):</strong></p>
+        <p>📦 Supplier SW: ${supSW ? '✅' : '❌'} <span class="addr">${truncAddr(CONFIG.contracts.SupplierSmartWallet)}</span></p>
+        <p>🛒 Buyer SW:    ${buySW ? '✅' : '❌'} <span class="addr">${truncAddr(CONFIG.contracts.BuyerSmartWallet)}</span></p>
+        <p>💰 Financier SW: ${finSW ? '✅' : '❌'} <span class="addr">${truncAddr(CONFIG.contracts.FinancierSmartWallet)}</span></p>
+      </div>
+    `;
+  } catch (err) {
+    console.error("Admin info error:", err);
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  LOAD INVOICES
+// ═════════════════════════════════════════════════════════════════════════════
+
+async function refreshInvoices() {
+  try {
+    const count = Number(await invoiceReadContract.counter());
+    allInvoices = [];
+
+    for (let i = 1; i <= count; i++) {
+      const raw = await invoiceReadContract.invoices(i);
+      allInvoices.push({
+        id:              Number(raw[0]),
+        supplier:        raw[1],
+        buyer:           raw[2],
+        amount:          raw[3],
+        dueDate:         Number(raw[4]),
+        buyerVerified:   raw[5],
+        escrowLocked:    raw[6],
+        financierFunded: raw[7],
+        isPaid:          raw[8],
+        status:          raw[9],
+        financier:       raw[10],
+      });
+    }
+
+    renderInvoicesForRole();
+    renderAllInvoices();
+    updateStats();
+    if (ROLE === "admin") loadAdminInfo();
+
+  } catch (err) {
+    console.error("Refresh invoices error:", err);
+    showToast("Failed to load invoices: " + parseError(err), "error");
+  }
+}
+
+/**
+ * Resolve an address: if it's a SmartWallet, show the role name
+ */
+function resolveAddr(addr) {
+  if (!addr || !CONFIG) return truncAddr(addr);
+  const a = addr.toLowerCase();
+  if (CONFIG.contracts.SupplierSmartWallet && a === CONFIG.contracts.SupplierSmartWallet.toLowerCase()) return "📦 Supplier";
+  if (CONFIG.contracts.BuyerSmartWallet && a === CONFIG.contracts.BuyerSmartWallet.toLowerCase()) return "🛒 Buyer";
+  if (CONFIG.contracts.FinancierSmartWallet && a === CONFIG.contracts.FinancierSmartWallet.toLowerCase()) return "💰 Financier";
+  if (a === CONFIG.roles.supplier.toLowerCase()) return "📦 Supplier";
+  if (a === CONFIG.roles.buyer.toLowerCase()) return "🛒 Buyer";
+  if (a === CONFIG.roles.financier.toLowerCase()) return "💰 Financier";
+  return truncAddr(addr);
+}
+
+function isMySmartWallet(addr) {
+  if (!userSmartWallet || !addr) return false;
+  return addr.toLowerCase() === userSmartWallet.toLowerCase();
+}
+
+function renderInvoicesForRole() {
+  if (ROLE === "supplier") {
+    const mine = allInvoices.filter(i => isMySmartWallet(i.supplier));
+    document.getElementById("supplierInvoices").innerHTML = mine.length
+      ? renderInvoiceTable(mine, "supplier")
+      : emptyState("📭", "No invoices uploaded yet");
+  }
+
+  if (ROLE === "buyer") {
+    const mine = allInvoices.filter(i => isMySmartWallet(i.buyer));
+    document.getElementById("buyerInvoices").innerHTML = mine.length
+      ? renderInvoiceTable(mine, "buyer")
+      : emptyState("📭", "No invoices assigned to you");
+  }
+
+  if (ROLE === "financier") {
+    const available = allInvoices.filter(i => !i.isPaid);
+    document.getElementById("financierInvoices").innerHTML = available.length
+      ? renderInvoiceTable(available, "financier")
+      : emptyState("📭", "No invoices available");
+  }
+}
+
+function renderAllInvoices() {
+  document.getElementById("allInvoicesTable").innerHTML = allInvoices.length
+    ? renderInvoiceTable(allInvoices, "all")
+    : emptyState("📭", "No invoices created yet");
+}
+
+function renderInvoiceTable(invoices, perspective) {
+  const now = Math.floor(Date.now() / 1000);
+
+  const rows = invoices.map(inv => {
+    const dueStr = new Date(inv.dueDate * 1000).toLocaleString();
+    const pastDue = now >= inv.dueDate;
+    const amtEth = ethers.formatEther(inv.amount);
+
+    let actions = "";
+
+    if (perspective === "buyer") {
+      if (inv.status === "PENDING_BUYER") {
+        actions += `<button class="btn btn-primary btn-sm" onclick="approveInvoice(${inv.id})">✅ Approve (AA)</button>`;
+      }
+      if (inv.status === "APPROVED" && !inv.escrowLocked) {
+        actions += `<button class="btn btn-primary btn-sm" onclick="depositEscrow(${inv.id})">🔒 Escrow ${amtEth} ETH</button>`;
+      }
+    }
+
+    if (perspective === "financier") {
+      if (inv.status === "ESCROWED" && !inv.financierFunded) {
+        actions += `<button class="btn btn-purple btn-sm" onclick="fundInvoice(${inv.id})">💰 Fund (AA)</button>`;
+      }
+    }
+
+    if (inv.status === "FINANCED" && pastDue && !inv.isPaid) {
+      actions += `<button class="btn btn-success btn-sm" onclick="releasePayment(${inv.id})">🔓 Release (AA)</button>`;
+    }
+
+    return `<tr>
+      <td><strong>#${inv.id}</strong></td>
+      <td>${resolveAddr(inv.supplier)}</td>
+      <td>${resolveAddr(inv.buyer)}</td>
+      <td class="eth-val">${amtEth} ETH</td>
+      <td style="font-size:0.78rem;">${dueStr}</td>
+      <td><span class="status-badge status-${inv.status}">${inv.status}</span></td>
+      <td class="action-btns">${actions || '<span style="color:var(--text-muted);">—</span>'}</td>
+    </tr>`;
+  }).join("");
+
+  return `
+    <div style="overflow-x:auto;">
+      <table class="invoice-table">
+        <thead><tr>
+          <th>ID</th><th>Supplier</th><th>Buyer</th><th>Amount</th><th>Due Date</th><th>Status</th><th>Actions</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  STATS
+// ═════════════════════════════════════════════════════════════════════════════
+
+function updateStats() {
+  document.getElementById("statTotal").textContent    = allInvoices.length;
+  document.getElementById("statPending").textContent   = allInvoices.filter(i => i.status === "PENDING_BUYER" || i.status === "PENDING").length;
+  document.getElementById("statFinanced").textContent  = allInvoices.filter(i => i.status === "FINANCED" || i.status === "ESCROWED").length;
+  document.getElementById("statPaid").textContent      = allInvoices.filter(i => i.status === "PAID").length;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  EVENT LISTENERS
+// ═════════════════════════════════════════════════════════════════════════════
+
+function debouncedRefresh() {
+  if (_refreshTimer) clearTimeout(_refreshTimer);
+  _refreshTimer = setTimeout(async () => {
+    _refreshTimer = null;
+    await refreshInvoices();
+  }, 500);
+}
+
+function setupEventListeners() {
+  const feed = document.getElementById("activityFeed");
+  feed.innerHTML = "";
+
+  // Use readProvider-based contract for events (bypasses MetaMask cache)
+  invoiceReadContract.on("InvoiceUploaded", (id, supplier, buyer, amount) => {
+    addFeedItem("📤", `Invoice <strong>#${id}</strong> uploaded by ${resolveAddr(supplier)} — ${ethers.formatEther(amount)} ETH <span class="aa-tag">via AA</span>`);
+    debouncedRefresh();
+  });
+
+  invoiceReadContract.on("AutoApproved", (id, reason) => {
+    addFeedItem("⚡", `Invoice <strong>#${id}</strong> auto-approved (${reason}) <span class="aa-tag">via AA</span>`);
+    debouncedRefresh();
+  });
+
+  invoiceReadContract.on("BuyerApproved", (id) => {
+    addFeedItem("✅", `Invoice <strong>#${id}</strong> approved by buyer <span class="aa-tag">via AA</span>`);
+    debouncedRefresh();
+  });
+
+  invoiceReadContract.on("EscrowDeposited", (id, amount) => {
+    addFeedItem("🔒", `Escrow deposited for #${id}: ${ethers.formatEther(amount)} ETH`);
+    debouncedRefresh();
+  });
+
+  invoiceReadContract.on("AutoFinanced", (id, financier, payout) => {
+    addFeedItem("⚡", `Invoice <strong>#${id}</strong> auto-financed — supplier got ${ethers.formatEther(payout)} ETH <span class="aa-tag">via AA</span>`);
+    debouncedRefresh();
+  });
+
+  invoiceReadContract.on("Paid", (id, financier, payout) => {
+    addFeedItem("💸", `Invoice <strong>#${id}</strong> PAID — financier received ${ethers.formatEther(payout)} ETH`);
+    debouncedRefresh();
+  });
+}
+
+function addFeedItem(icon, text) {
+  const feed = document.getElementById("activityFeed");
+  const time = new Date().toLocaleTimeString();
+  const item = document.createElement("div");
+  item.className = "feed-item";
+  item.innerHTML = `
+    <span class="feed-icon">${icon}</span>
+    <div>
+      <div class="feed-text">${text}</div>
+      <div class="feed-time">${time}</div>
+    </div>
+  `;
+  feed.prepend(item);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  TAB SWITCHING
+// ═════════════════════════════════════════════════════════════════════════════
+
+function switchTab(el) {
+  document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+  el.classList.add("active");
+
+  const target = el.dataset.tab;
+  ["myDashboard", "allInvoices", "activityFeed", "adminPanel"].forEach(id => {
+    document.getElementById(`tab-${id}`).classList.toggle("hidden", id !== target);
+  });
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  UTILITIES
+// ═════════════════════════════════════════════════════════════════════════════
+
+function truncAddr(addr) {
+  if (!addr) return "—";
+  return addr.slice(0, 6) + "..." + addr.slice(-4);
+}
+
+function emptyState(icon, text) {
+  return `<div class="empty-state"><div class="icon">${icon}</div><p>${text}</p></div>`;
+}
+
+function parseError(err) {
+  if (err?.reason) return err.reason;
+  if (err?.data?.message) return err.data.message;
+  if (err?.message) {
+    const msg = err.message;
+    if (msg.includes("user rejected")) return "Transaction rejected by user";
+    if (msg.includes("insufficient funds")) return "Insufficient ETH balance";
+    if (msg.includes("Bundler relay")) return "Bundler relay not running. Start: node scripts/bundler-relay.js";
+    return msg.slice(0, 200);
+  }
+  return "Unknown error";
+}
+
+function showToast(message, type = "info") {
+  const container = document.getElementById("toastContainer");
+  const toast = document.createElement("div");
+  toast.className = `toast ${type}`;
+  toast.textContent = message;
+  container.appendChild(toast);
+  setTimeout(() => toast.remove(), 4500);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  AUTO-INIT
+// ═════════════════════════════════════════════════════════════════════════════
+
+(async function init() {
+  if (window.ethereum) {
+    const accounts = await window.ethereum.request({ method: "eth_accounts" });
+    if (accounts.length > 0) {
+      await connectWallet();
+    }
+  }
+})();
