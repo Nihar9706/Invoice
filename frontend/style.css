@@ -736,3 +736,16 @@ body::before {
   margin-left: 0.3rem;
 }
 
+/* ── Countdown Timer ──────────────────────────────────────────────────────── */
+.countdown-timer {
+  min-width: 70px;
+}
+
+@keyframes pulse-overdue {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.4; }
+}
+
+.countdown-pulse {
+  animation: pulse-overdue 1s ease-in-out infinite;
+}

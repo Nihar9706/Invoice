@@ -332,8 +332,7 @@ function showRoleSection() {
     document.getElementById("supplierSection").classList.remove("hidden");
     // Pre-fill with BUYER's SmartWallet address (not EOA!)
     document.getElementById("invBuyer").value = CONFIG.contracts.BuyerSmartWallet;
-    const d = new Date(Date.now() + 2 * 60 * 1000);
-    document.getElementById("invDueDate").value = d.toISOString().slice(0, 16);
+    // Slider default is already set to 5 min in HTML
   } else if (ROLE === "buyer") {
     document.getElementById("buyerSection").classList.remove("hidden");
   } else if (ROLE === "financier") {
@@ -361,10 +360,14 @@ function showRoleSection() {
 async function uploadInvoice() {
    const buyerAddr = document.getElementById("invBuyer").value.trim();
   const amtStr  = document.getElementById("invAmount").value.trim();
-  const dateStr = document.getElementById("invDueDate").value;
+  const dueMins = parseInt(document.getElementById("invDueMins").value, 10);
 
-  if (!buyerAddr || !amtStr || !dateStr) {
+  if (!buyerAddr || !amtStr) {
     showToast("Fill in all fields", "error");
+    return;
+  }
+  if (isNaN(dueMins) || dueMins < 1 || dueMins > 30) {
+    showToast("Due time must be between 1 and 30 minutes", "error");
     return;
   }
 
@@ -376,12 +379,7 @@ async function uploadInvoice() {
   }
 
   const amount  = ethers.parseEther(amtStr);
-  const dueDate = Math.floor(new Date(dateStr).getTime() / 1000);
-
-  if (dueDate <= Math.floor(Date.now() / 1000)) {
-    showToast("Due date must be in the future", "error");
-    return;
-  }
+  const dueDate = Math.floor(Date.now() / 1000) + (dueMins * 60);
 
   const btn = document.getElementById("uploadBtn");
   btn.disabled = true;
@@ -789,6 +787,27 @@ function renderInvoiceTable(invoices, perspective) {
     const dueStr = new Date(inv.dueDate * 1000).toLocaleString();
     const pastDue = now >= inv.dueDate;
     const amtEth = ethers.formatEther(inv.amount);
+    const secsLeft = inv.dueDate - now;
+
+    // Build countdown HTML
+    let countdownHtml = "";
+    if (inv.isPaid) {
+      countdownHtml = `<span style="color:var(--paid);font-weight:600;">✅ Paid</span>`;
+    } else if (pastDue) {
+      countdownHtml = `<span style="color:#ef4444;font-weight:600;" class="countdown-pulse">⏰ OVERDUE</span>`;
+    } else {
+      const mm = Math.floor(secsLeft / 60);
+      const ss = secsLeft % 60;
+      const pct = Math.max(0, Math.min(100, (secsLeft / (30 * 60)) * 100));
+      const barColor = pct > 50 ? "#22c55e" : pct > 20 ? "#f59e0b" : "#ef4444";
+      countdownHtml = `
+        <div class="countdown-timer" data-due="${inv.dueDate}">
+          <span style="font-weight:700;font-size:0.95rem;color:${barColor};">${String(mm).padStart(2,"0")}:${String(ss).padStart(2,"0")}</span>
+          <div style="height:4px;background:rgba(255,255,255,0.1);border-radius:2px;margin-top:3px;">
+            <div style="height:100%;width:${pct}%;background:${barColor};border-radius:2px;transition:width 1s linear;"></div>
+          </div>
+        </div>`;
+    }
 
     let actions = "";
 
@@ -817,6 +836,7 @@ function renderInvoiceTable(invoices, perspective) {
       <td>${resolveAddr(inv.buyer)}</td>
       <td class="eth-val">${amtEth} ETH</td>
       <td style="font-size:0.78rem;">${dueStr}</td>
+      <td>${countdownHtml}</td>
       <td><span class="status-badge status-${inv.status}">${inv.status}</span></td>
       <td class="action-btns">${actions || '<span style="color:var(--text-muted);">—</span>'}</td>
     </tr>`;
@@ -826,12 +846,58 @@ function renderInvoiceTable(invoices, perspective) {
     <div style="overflow-x:auto;">
       <table class="invoice-table">
         <thead><tr>
-          <th>ID</th><th>Supplier</th><th>Buyer</th><th>Amount</th><th>Due Date</th><th>Status</th><th>Actions</th>
+          <th>ID</th><th>Supplier</th><th>Buyer</th><th>Amount</th><th>Due Date</th><th>⏱ Countdown</th><th>Status</th><th>Actions</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </div>
   `;
+}
+
+// ─── Live countdown ticker (runs every second) ──────────────────────────────
+let _countdownInterval = null;
+function startCountdownTicker() {
+  if (_countdownInterval) return;  // already running
+  _countdownInterval = setInterval(() => {
+    const timers = document.querySelectorAll(".countdown-timer[data-due]");
+    if (!timers.length) return;
+
+    const now = Math.floor(Date.now() / 1000);
+    let needsRefresh = false;
+
+    timers.forEach(el => {
+      const due = parseInt(el.dataset.due, 10);
+      const secsLeft = due - now;
+
+      if (secsLeft <= 0) {
+        el.innerHTML = `<span style="color:#ef4444;font-weight:600;" class="countdown-pulse">⏰ OVERDUE</span>`;
+        needsRefresh = true;
+        return;
+      }
+
+      const mm = Math.floor(secsLeft / 60);
+      const ss = secsLeft % 60;
+      const pct = Math.max(0, Math.min(100, (secsLeft / (30 * 60)) * 100));
+      const barColor = pct > 50 ? "#22c55e" : pct > 20 ? "#f59e0b" : "#ef4444";
+
+      el.innerHTML = `
+        <span style="font-weight:700;font-size:0.95rem;color:${barColor};">${String(mm).padStart(2,"0")}:${String(ss).padStart(2,"0")}</span>
+        <div style="height:4px;background:rgba(255,255,255,0.1);border-radius:2px;margin-top:3px;">
+          <div style="height:100%;width:${pct}%;background:${barColor};border-radius:2px;transition:width 1s linear;"></div>
+        </div>`;
+    });
+
+    // When a timer hits zero, re-render to show the "Release" button
+    if (needsRefresh) {
+      renderInvoicesForRole();
+      renderAllInvoices();
+    }
+  }, 1000);
+}
+
+// Start ticker on page load
+if (typeof window !== "undefined") {
+  window.addEventListener("DOMContentLoaded", startCountdownTicker);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
