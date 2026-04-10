@@ -106,6 +106,63 @@ async function handleSubmit(op) {
   const signature = await signUserOp(op);
   console.log(`   ✅ Signed by SmartWallet owner`);
 
+  // ─── AUTO-DEPOSIT INTERCEPTOR ───────────────────────────────────────────────
+  // In our UserOp schema: op.target = contract address, op.data = raw calldata
+  // (NOT wrapped in SmartWallet.execute — the bundler does that on-chain)
+  // ────────────────────────────────────────────────────────────────────────────
+  try {
+    const invIface = new ethers.Interface([
+      "function fundInvoice(uint256 id)",
+    ]);
+    const decoded = invIface.parseTransaction({ data: op.data });
+
+    if (decoded && decoded.name === "fundInvoice") {
+      const id = decoded.args[0];
+      console.log(`   💡 Auto-Deposit intercepted fundInvoice(#${id})`);
+
+      // Look up the SmartWallet owner (= the Financier's EOA)
+      const smartWallet = new ethers.Contract(op.sender, SMART_WALLET_ABI, provider);
+      const ownerAddr = (await smartWallet.owner()).toLowerCase();
+
+      // Read invoice amount and current deposit
+      const invContract = new ethers.Contract(
+        op.target,                       // <-- InvoiceContract address
+        [
+          "function invoices(uint256) view returns (uint256,address,address,uint256,uint256,bool,bool,bool,bool,string,address)",
+          "function depositFor(address) payable",
+          "function deposits(address) view returns (uint256)",
+        ],
+        provider
+      );
+
+      const inv = await invContract.invoices(id);
+      const invoiceAmount = inv[3];
+      const supplierPayout = (invoiceAmount * 90n) / 100n;   // what _executeFinancing deducts
+
+      const currentDeposit = await invContract.deposits(op.sender);
+
+      if (currentDeposit < supplierPayout) {
+        const needed = supplierPayout - currentDeposit;
+        console.log(`   ⚡ Pulling ${ethers.formatEther(needed)} ETH from EOA ${ownerAddr}...`);
+
+        const privateKey = PRIVATE_KEYS[ownerAddr];
+        if (privateKey) {
+          const eoaWallet = new ethers.Wallet(privateKey, provider);
+          const depTx = await invContract.connect(eoaWallet).depositFor(op.sender, { value: needed });
+          await depTx.wait();
+          console.log(`   ✅ Deposited ${ethers.formatEther(needed)} ETH from EOA → SmartWallet deposit`);
+        } else {
+          console.log(`   ⚠️  No private key for ${ownerAddr}, skipping auto-deposit`);
+        }
+      } else {
+        console.log(`   ✅ Sufficient deposit already (${ethers.formatEther(currentDeposit)} ETH)`);
+      }
+    }
+  } catch (_) {
+    // Not a fundInvoice call — nothing to intercept
+  }
+  // ────────────────────────────────────────────────────────────────────────────
+
   // Step 2: Build the full UserOp with signature
   const fullOp = {
     sender:    op.sender,

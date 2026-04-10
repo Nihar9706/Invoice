@@ -97,10 +97,6 @@ async function main() {
   await invoice.connect(owner).depositFor(buyerWallet.target, { value: depositAmt });
   console.log(`   ✅ Buyer SmartWallet pre-deposited: 100 ETH`);
 
-  // Owner deposits on behalf of financier SmartWallet
-  await invoice.connect(owner).depositFor(financierWallet.target, { value: depositAmt });
-  console.log(`   ✅ Financier SmartWallet pre-deposited: 100 ETH`);
-
   // ─── Save addresses to frontend config ─────────────────────────────────────
   const config = {
     network: "localhost",
