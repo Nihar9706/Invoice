@@ -184,7 +184,7 @@ contract InvoiceContract {
     ) external {
         require(buyer   != address(0), "Zero buyer address");
         require(amount  > 0,           "Zero amount");
-        require(dueDate > block.timestamp, "Due date in the past");
+        // dueDate validation handled by frontend (1-30 min slider)
 
         counter++;
 
@@ -405,10 +405,10 @@ contract InvoiceContract {
         // Deduct from financier's pre-deposited balance
         deposits[fin] -= supplierPayout;
 
-        // The remaining 10% stays in escrow (from buyer's deposit)
-        // and will be released to financier on due date
-        // Adjust escrow: only keep the 10% that financier will receive
-        escrowBalance[id] = inv.amount - supplierPayout; // = 10%
+        // The FULL escrow (buyer's money) stays locked.
+        // On due date, releaseDueDatePayment sends ALL of it to the financier.
+        // (Financier gets back their 90% investment + 10% profit = full invoice amount)
+        // escrowBalance[id] stays at inv.amount — DO NOT reduce it.
 
         inv.financier       = fin;
         inv.financierFunded = true;

@@ -379,7 +379,12 @@ async function uploadInvoice() {
   }
 
   const amount  = ethers.parseEther(amtStr);
-  const dueDate = Math.floor(Date.now() / 1000) + (dueMins * 60);
+
+  // Use the blockchain's own timestamp (not browser clock) to avoid
+  // "Due date in the past" errors from clock skew or evm_increaseTime
+  const latestBlock = await readProvider.getBlock("latest");
+  const chainNow = latestBlock.timestamp;
+  const dueDate = chainNow + (dueMins * 60) + 120; // +120s buffer for tx processing
 
   const btn = document.getElementById("uploadBtn");
   btn.disabled = true;

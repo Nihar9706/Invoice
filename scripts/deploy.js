@@ -89,13 +89,9 @@ async function main() {
   await paymaster.connect(owner).addUser(financierWallet.target);
   console.log("   ✅ Financier SmartWallet whitelisted");
 
-  // ─── Pre-deposit ETH for Buyer & Financier SmartWallets ─────────────────────
-  console.log("\n─── Pre-depositing ETH into InvoiceContract ───");
-  const depositAmt = ethers.parseEther("100");
 
-  // Owner deposits on behalf of buyer SmartWallet
-  await invoice.connect(owner).depositFor(buyerWallet.target, { value: depositAmt });
-  console.log(`   ✅ Buyer SmartWallet pre-deposited: 100 ETH`);
+  // No pre-deposits — the bundler relay auto-deposits from EOA on demand
+  // so MetaMask balances visibly change for both buyer AND financier
 
   // ─── Save addresses to frontend config ─────────────────────────────────────
   const config = {

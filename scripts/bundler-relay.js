@@ -109,24 +109,30 @@ async function handleSubmit(op) {
   // ─── AUTO-DEPOSIT INTERCEPTOR ───────────────────────────────────────────────
   // In our UserOp schema: op.target = contract address, op.data = raw calldata
   // (NOT wrapped in SmartWallet.execute — the bundler does that on-chain)
+  //
+  // We intercept TWO functions:
+  //   1. approveByBuyer(id) → pull invoice amount from Buyer's MetaMask (for escrow)
+  //   2. fundInvoice(id)    → pull 90% of amount from Financier's MetaMask (for funding)
   // ────────────────────────────────────────────────────────────────────────────
   try {
-    const invIface = new ethers.Interface([
+    const iface = new ethers.Interface([
+      "function approveByBuyer(uint256 id)",
       "function fundInvoice(uint256 id)",
     ]);
-    const decoded = invIface.parseTransaction({ data: op.data });
+    const decoded = iface.parseTransaction({ data: op.data });
 
-    if (decoded && decoded.name === "fundInvoice") {
+    if (decoded && (decoded.name === "approveByBuyer" || decoded.name === "fundInvoice")) {
       const id = decoded.args[0];
-      console.log(`   💡 Auto-Deposit intercepted fundInvoice(#${id})`);
+      const fnName = decoded.name;
+      console.log(`   💡 Auto-Deposit intercepted ${fnName}(#${id})`);
 
-      // Look up the SmartWallet owner (= the Financier's EOA)
+      // Look up the SmartWallet owner (= the user's EOA)
       const smartWallet = new ethers.Contract(op.sender, SMART_WALLET_ABI, provider);
       const ownerAddr = (await smartWallet.owner()).toLowerCase();
 
-      // Read invoice amount and current deposit
+      // Read invoice details and current deposit
       const invContract = new ethers.Contract(
-        op.target,                       // <-- InvoiceContract address
+        op.target,
         [
           "function invoices(uint256) view returns (uint256,address,address,uint256,uint256,bool,bool,bool,bool,string,address)",
           "function depositFor(address) payable",
@@ -137,20 +143,30 @@ async function handleSubmit(op) {
 
       const inv = await invContract.invoices(id);
       const invoiceAmount = inv[3];
-      const supplierPayout = (invoiceAmount * 90n) / 100n;   // what _executeFinancing deducts
+
+      // Calculate how much the contract will deduct
+      let requiredDeposit;
+      if (fnName === "approveByBuyer") {
+        // _tryAutoEscrow deducts the full invoice amount from buyer's deposit
+        requiredDeposit = invoiceAmount;
+      } else {
+        // _executeFinancing deducts 90% from financier's deposit
+        requiredDeposit = (invoiceAmount * 90n) / 100n;
+      }
 
       const currentDeposit = await invContract.deposits(op.sender);
 
-      if (currentDeposit < supplierPayout) {
-        const needed = supplierPayout - currentDeposit;
-        console.log(`   ⚡ Pulling ${ethers.formatEther(needed)} ETH from EOA ${ownerAddr}...`);
+      if (currentDeposit < requiredDeposit) {
+        const needed = requiredDeposit - currentDeposit;
+        const roleName = fnName === "approveByBuyer" ? "Buyer" : "Financier";
+        console.log(`   ⚡ Pulling ${ethers.formatEther(needed)} ETH from ${roleName}'s MetaMask EOA (${ownerAddr})...`);
 
         const privateKey = PRIVATE_KEYS[ownerAddr];
         if (privateKey) {
           const eoaWallet = new ethers.Wallet(privateKey, provider);
           const depTx = await invContract.connect(eoaWallet).depositFor(op.sender, { value: needed });
           await depTx.wait();
-          console.log(`   ✅ Deposited ${ethers.formatEther(needed)} ETH from EOA → SmartWallet deposit`);
+          console.log(`   ✅ Deposited ${ethers.formatEther(needed)} ETH from ${roleName}'s EOA → contract deposit`);
         } else {
           console.log(`   ⚠️  No private key for ${ownerAddr}, skipping auto-deposit`);
         }
@@ -159,7 +175,7 @@ async function handleSubmit(op) {
       }
     }
   } catch (_) {
-    // Not a fundInvoice call — nothing to intercept
+    // Not an interceptable call — nothing to do
   }
   // ────────────────────────────────────────────────────────────────────────────
 
