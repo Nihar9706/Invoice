@@ -357,40 +357,44 @@ function showRoleSection() {
 // ═════════════════════════════════════════════════════════════════════════════
 
 // ── Upload Invoice (Supplier) — GASLESS via AA ───────────────────────────────
+let _uploadLock = false;
 async function uploadInvoice() {
-   const buyerAddr = document.getElementById("invBuyer").value.trim();
-  const amtStr  = document.getElementById("invAmount").value.trim();
-  const dueMins = parseInt(document.getElementById("invDueMins").value, 10);
-
-  if (!buyerAddr || !amtStr) {
-    showToast("Fill in all fields", "error");
-    return;
-  }
-  if (isNaN(dueMins) || dueMins < 1 || dueMins > 30) {
-    showToast("Due time must be between 1 and 30 minutes", "error");
-    return;
-  }
-
-  // Resolve buyer address: if it matches the Buyer EOA, use their SmartWallet
-  // This ensures deposits[BuyerSmartWallet] and inv.buyer match
-  let resolvedBuyer = buyerAddr;
-  if (buyerAddr.toLowerCase() === CONFIG.roles.buyer.toLowerCase()) {
-    resolvedBuyer = CONFIG.contracts.BuyerSmartWallet;
-  }
-
-  const amount  = ethers.parseEther(amtStr);
-
-  // Use the blockchain's own timestamp (not browser clock) to avoid
-  // "Due date in the past" errors from clock skew or evm_increaseTime
-  const latestBlock = await readProvider.getBlock("latest");
-  const chainNow = latestBlock.timestamp;
-  const dueDate = chainNow + (dueMins * 60) + 120; // +120s buffer for tx processing
+  // ── Double-click guard ──────────────────────────────────────────────────
+  if (_uploadLock) return;
+  _uploadLock = true;
 
   const btn = document.getElementById("uploadBtn");
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner"></span> Uploading via AA...';
 
   try {
+    const buyerAddr = document.getElementById("invBuyer").value.trim();
+    const amtStr  = document.getElementById("invAmount").value.trim();
+    const dueMins = parseInt(document.getElementById("invDueMins").value, 10);
+
+    if (!buyerAddr || !amtStr) {
+      showToast("Fill in all fields", "error");
+      return;
+    }
+    if (isNaN(dueMins) || dueMins < 1 || dueMins > 30) {
+      showToast("Due time must be between 1 and 30 minutes", "error");
+      return;
+    }
+
+    // Resolve buyer address: if it matches the Buyer EOA, use their SmartWallet
+    let resolvedBuyer = buyerAddr;
+    if (buyerAddr.toLowerCase() === CONFIG.roles.buyer.toLowerCase()) {
+      resolvedBuyer = CONFIG.contracts.BuyerSmartWallet;
+    }
+
+    const amount  = ethers.parseEther(amtStr);
+
+    // Use the blockchain's own timestamp (not browser clock) to avoid
+    // "Due date in the past" errors from clock skew or evm_increaseTime
+    const latestBlock = await readProvider.getBlock("latest");
+    const chainNow = latestBlock.timestamp;
+    const dueDate = chainNow + (dueMins * 60) + 120; // +120s buffer for tx processing
+
     const result = await sendAACall(
       INVOICE_ABI,
       CONFIG.contracts.InvoiceContract,
@@ -403,6 +407,7 @@ async function uploadInvoice() {
     console.error("Upload failed:", err);
     showToast("Upload failed: " + parseError(err), "error");
   } finally {
+    _uploadLock = false;
     btn.disabled = false;
     btn.innerHTML = '📤 Upload Invoice';
   }
@@ -988,9 +993,14 @@ function switchTab(el) {
   el.classList.add("active");
 
   const target = el.dataset.tab;
-  ["myDashboard", "allInvoices", "activityFeed", "adminPanel"].forEach(id => {
+  ["myDashboard", "allInvoices", "historyTab", "activityFeed", "adminPanel"].forEach(id => {
     document.getElementById(`tab-${id}`).classList.toggle("hidden", id !== target);
   });
+
+  // Auto-load history when History tab is opened
+  if (target === "historyTab" && connectedAddr) {
+    loadHistory();
+  }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1026,6 +1036,238 @@ function showToast(message, type = "info") {
   toast.textContent = message;
   container.appendChild(toast);
   setTimeout(() => toast.remove(), 4500);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  HISTORY — MongoDB-backed persistent event timeline
+// ═════════════════════════════════════════════════════════════════════════════
+
+const HISTORY_API = "http://localhost:3002/api";
+let _allHistoryEvents = [];
+let _currentHistoryFilter = "all";
+
+async function loadHistory() {
+  try {
+    // Try to load role-specific history
+    const url = connectedAddr
+      ? `${HISTORY_API}/history/${connectedAddr}`
+      : `${HISTORY_API}/history`;
+
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error("History server not running");
+    const data = await resp.json();
+
+    if (!data.success) throw new Error(data.error || "Unknown error");
+
+    _allHistoryEvents = data.events || [];
+    document.getElementById("historyCount").textContent = `${_allHistoryEvents.length} events`;
+    renderHistoryTimeline(_allHistoryEvents);
+  } catch (err) {
+    const timeline = document.getElementById("historyTimeline");
+    timeline.innerHTML = `
+      <div class="empty-state">
+        <div class="icon">⚠️</div>
+        <p>History server not available. Start it with: <code>node scripts/server.js</code></p>
+      </div>`;
+  }
+}
+
+async function syncHistory() {
+  const btn = document.getElementById("syncBtn");
+  btn.disabled = true;
+  btn.textContent = "⏳ Syncing...";
+  try {
+    const resp = await fetch(`${HISTORY_API}/sync`, { method: "POST" });
+    const data = await resp.json();
+    showToast(`✅ Synced ${data.synced} events from blockchain`, "success");
+    await loadHistory();
+  } catch (err) {
+    showToast("Sync failed: " + err.message, "error");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "🔄 Sync";
+  }
+}
+
+function filterHistory(el) {
+  document.querySelectorAll(".filter-pill").forEach(p => p.classList.remove("active"));
+  el.classList.add("active");
+
+  const filter = el.dataset.filter;
+  _currentHistoryFilter = filter;
+
+  if (filter === "all") {
+    renderHistoryTimeline(_allHistoryEvents);
+  } else {
+    const types = filter.split(",");
+    const filtered = _allHistoryEvents.filter(e => types.includes(e.eventType));
+    renderHistoryTimeline(filtered);
+  }
+}
+
+function getEventBadge(type) {
+  const map = {
+    InvoiceUploaded:     { icon: "📤", label: "Uploaded",  cls: "badge-uploaded" },
+    BuyerApproved:       { icon: "✅", label: "Approved",  cls: "badge-approved" },
+    AutoApproved:        { icon: "🤖", label: "Auto-Approved", cls: "badge-approved" },
+    EscrowDeposited:     { icon: "🔒", label: "Escrowed",  cls: "badge-escrowed" },
+    Financed:            { icon: "💰", label: "Financed",  cls: "badge-financed" },
+    Paid:                { icon: "✅", label: "Paid",      cls: "badge-paid" },
+    Deposited:           { icon: "⬆️", label: "Deposit",   cls: "badge-deposit" },
+    Withdrawn:           { icon: "⬇️", label: "Withdraw",  cls: "badge-withdraw" },
+    BuyerConditionSet:   { icon: "⚙️", label: "Condition", cls: "badge-condition" },
+    FinancierConditionSet: { icon: "⚙️", label: "Condition", cls: "badge-condition" },
+  };
+  return map[type] || { icon: "📝", label: type, cls: "badge-uploaded" };
+}
+
+function timeAgo(dateStr) {
+  const now = Date.now();
+  const then = new Date(dateStr).getTime();
+  const diff = Math.floor((now - then) / 1000);
+
+  if (diff < 60) return `${diff}s ago`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  return `${Math.floor(diff / 86400)}d ago`;
+}
+
+// Resolve a SmartWallet address to a readable "Role (0x1234...abcd)" label
+function resolveAddrLabel(addr) {
+  if (!addr) return null;
+  const a = addr.toLowerCase();
+  const c = CONFIG.contracts || {};
+  const r = CONFIG.roles || {};
+  let role = null;
+  let eoaAddr = addr;
+
+  if (a === c.SupplierSmartWallet?.toLowerCase()) { role = "Supplier"; eoaAddr = r.supplier; }
+  else if (a === c.BuyerSmartWallet?.toLowerCase()) { role = "Buyer"; eoaAddr = r.buyer; }
+  else if (a === c.FinancierSmartWallet?.toLowerCase()) { role = "Financier"; eoaAddr = r.financier; }
+  else if (a === r.supplier?.toLowerCase()) { role = "Supplier"; eoaAddr = r.supplier; }
+  else if (a === r.buyer?.toLowerCase()) { role = "Buyer"; eoaAddr = r.buyer; }
+  else if (a === r.financier?.toLowerCase()) { role = "Financier"; eoaAddr = r.financier; }
+
+  if (role && eoaAddr) {
+    return `${role} (${truncAddr(eoaAddr)})`;
+  }
+  return truncAddr(addr);
+}
+
+function renderHistoryTimeline(events) {
+  const container = document.getElementById("historyTimeline");
+
+  if (!events || events.length === 0) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <div class="icon">📜</div>
+        <p>No events found. Upload an invoice to get started!</p>
+      </div>`;
+    return;
+  }
+
+  // ── Build invoice lifecycle summaries ──────────────────────────────────
+  const invoiceMap = {};
+  events.forEach(ev => {
+    if (ev.invoiceId == null) return;
+    if (!invoiceMap[ev.invoiceId]) {
+      invoiceMap[ev.invoiceId] = { events: [], supplier: null, buyer: null, financier: null, amount: null, status: "Pending" };
+    }
+    const inv = invoiceMap[ev.invoiceId];
+    inv.events.push(ev);
+    if (ev.supplier) inv.supplier = ev.supplier;
+    if (ev.buyer) inv.buyer = ev.buyer;
+    if (ev.financier) inv.financier = ev.financier;
+    if (ev.amount && ev.eventType === "InvoiceUploaded") inv.amount = ev.amount;
+
+    // Determine latest status
+    if (ev.eventType === "Paid") inv.status = "Paid";
+    else if (ev.eventType === "Financed" && inv.status !== "Paid") inv.status = "Financed";
+    else if (ev.eventType === "EscrowDeposited" && !["Financed","Paid"].includes(inv.status)) inv.status = "Escrowed";
+    else if ((ev.eventType === "BuyerApproved" || ev.eventType === "AutoApproved") && !["Escrowed","Financed","Paid"].includes(inv.status)) inv.status = "Approved";
+  });
+
+  // ── Render invoice summary cards ──────────────────────────────────────
+  let summaryHtml = "";
+  const invoiceIds = Object.keys(invoiceMap).sort((a,b) => Number(a) - Number(b));
+  if (invoiceIds.length > 0) {
+    const statusColors = { Pending: "#facc15", Approved: "#4ade80", Escrowed: "#60a5fa", Financed: "#c084fc", Paid: "#34d399" };
+    const statusSteps = ["Pending", "Approved", "Escrowed", "Financed", "Paid"];
+
+    summaryHtml = `<div class="history-invoices-summary">
+      <h3 style="color:var(--text-secondary);font-size:0.85rem;margin:0 0 0.8rem 0;font-weight:600;">📊 Invoice Lifecycle Status</h3>
+      <div style="display:flex;flex-wrap:wrap;gap:0.75rem;margin-bottom:1.5rem;">
+      ${invoiceIds.map(id => {
+        const inv = invoiceMap[id];
+        const stepIdx = statusSteps.indexOf(inv.status);
+        const statusColor = statusColors[inv.status] || "#818cf8";
+        const progressPct = ((stepIdx + 1) / statusSteps.length) * 100;
+
+        return `<div style="flex:1;min-width:260px;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:0.9rem 1rem;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;">
+            <span style="font-weight:700;color:var(--text-primary);font-size:0.95rem;">Invoice #${id}</span>
+            <span style="font-size:0.7rem;font-weight:600;padding:0.15rem 0.5rem;border-radius:4px;background:${statusColor}22;color:${statusColor};">${inv.status.toUpperCase()}</span>
+          </div>
+          ${inv.amount ? `<div style="font-family:'JetBrains Mono',monospace;font-size:0.95rem;font-weight:700;color:var(--accent);margin-bottom:0.5rem;">${inv.amount} ETH</div>` : ""}
+          <div style="display:flex;flex-direction:column;gap:0.25rem;font-size:0.72rem;color:var(--text-secondary);">
+            ${inv.supplier ? `<div>📦 <strong style="color:var(--text-primary)">Supplier:</strong> ${resolveAddrLabel(inv.supplier)}</div>` : ""}
+            ${inv.buyer ? `<div>🛒 <strong style="color:var(--text-primary)">Buyer:</strong> ${resolveAddrLabel(inv.buyer)}</div>` : ""}
+            ${inv.financier ? `<div>💰 <strong style="color:var(--text-primary)">Financier:</strong> ${resolveAddrLabel(inv.financier)}</div>` : ""}
+          </div>
+          <div style="margin-top:0.6rem;">
+            <div style="display:flex;justify-content:space-between;font-size:0.62rem;color:var(--text-muted);margin-bottom:0.2rem;">
+              ${statusSteps.map(s => `<span style="${s === inv.status ? 'color:'+statusColor+';font-weight:600' : ''}">${s}</span>`).join("")}
+            </div>
+            <div style="height:4px;background:rgba(255,255,255,0.05);border-radius:2px;overflow:hidden;">
+              <div style="height:100%;width:${progressPct}%;background:${statusColor};border-radius:2px;transition:width 0.3s;"></div>
+            </div>
+          </div>
+        </div>`;
+      }).join("")}
+      </div>
+    </div>`;
+  }
+
+  // ── Render event timeline ─────────────────────────────────────────────
+  const timelineHtml = events.map((ev, i) => {
+    const badge = getEventBadge(ev.eventType);
+    const ts = new Date(ev.timestamp);
+    const timeStr = ts.toLocaleString();
+    const ago = timeAgo(ev.timestamp);
+
+    // Build address rows
+    let addressHtml = "";
+    if (ev.supplier) addressHtml += `<div class="history-meta-item"><span class="label">📦 Supplier:</span> ${resolveAddrLabel(ev.supplier)}</div>`;
+    if (ev.buyer) addressHtml += `<div class="history-meta-item"><span class="label">🛒 Buyer:</span> ${resolveAddrLabel(ev.buyer)}</div>`;
+    if (ev.financier) addressHtml += `<div class="history-meta-item"><span class="label">💰 Financier:</span> ${resolveAddrLabel(ev.financier)}</div>`;
+
+    let metaItems = "";
+    if (ev.invoiceId != null) {
+      metaItems += `<div class="history-meta-item"><span class="label">Invoice:</span> #${ev.invoiceId}</div>`;
+    }
+    if (ev.amount) {
+      metaItems += `<div class="history-meta-item"><span class="label">Amount:</span> <span class="history-amount">${ev.amount} ETH</span></div>`;
+    }
+    if (ev.txHash) {
+      metaItems += `<div class="history-meta-item"><span class="label">TX:</span> ${ev.txHash.slice(0, 10)}…${ev.txHash.slice(-6)}</div>`;
+    }
+    if (ev.blockNumber) {
+      metaItems += `<div class="history-meta-item"><span class="label">Block:</span> ${ev.blockNumber}</div>`;
+    }
+
+    return `
+      <div class="history-event" style="animation-delay: ${i * 0.05}s">
+        <div class="history-event-top">
+          <span class="history-event-badge ${badge.cls}">${badge.icon} ${badge.label}</span>
+          <span class="history-event-time" title="${timeStr}">${ago}</span>
+        </div>
+        <div class="history-event-details">${ev.details || ev.eventType}</div>
+        ${addressHtml ? `<div class="history-event-meta" style="margin-top:0.4rem;">${addressHtml}</div>` : ""}
+        <div class="history-event-meta">${metaItems}</div>
+      </div>`;
+  }).join("");
+
+  container.innerHTML = summaryHtml + timelineHtml;
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

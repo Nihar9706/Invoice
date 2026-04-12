@@ -21,9 +21,11 @@ interface IEntryPoint {
         bytes   data;
         bytes   signature;
         address paymaster;   // ← new field
+        uint256 nonce;       // ← replay protection
     }
 
     function handleOp(UserOperation calldata op) external;
+    function nonces(address) external view returns (uint256);
 }
 
 contract Bundler {
@@ -36,6 +38,7 @@ contract Bundler {
         bytes   data;
         bytes   signature;
         address paymaster;   // address(0) = user pays gas; else = gasless
+        uint256 nonce;       // replay protection
     }
 
     address public entryPoint;
@@ -71,7 +74,8 @@ contract Bundler {
                 target:    ops[i].target,
                 data:      ops[i].data,
                 signature: ops[i].signature,
-                paymaster: ops[i].paymaster    // ← forwarded to EntryPoint
+                paymaster: ops[i].paymaster,
+                nonce:     ops[i].nonce
             });
 
             IEntryPoint(entryPoint).handleOp(op);
@@ -90,7 +94,8 @@ contract Bundler {
             target:    op.target,
             data:      op.data,
             signature: op.signature,
-            paymaster: op.paymaster
+            paymaster: op.paymaster,
+            nonce:     op.nonce
         });
 
         IEntryPoint(entryPoint).handleOp(epOp);

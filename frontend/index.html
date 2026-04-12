@@ -78,6 +78,7 @@
       <div class="tabs">
         <button class="tab active" data-tab="myDashboard" onclick="switchTab(this)">📋 My Dashboard</button>
         <button class="tab" data-tab="allInvoices" onclick="switchTab(this)">📑 All Invoices</button>
+        <button class="tab" data-tab="historyTab" onclick="switchTab(this)">📜 History</button>
         <button class="tab" data-tab="activityFeed" onclick="switchTab(this)">⚡ Activity</button>
         <button class="tab" data-tab="adminPanel" onclick="switchTab(this)" id="adminTab">⚙️ Admin</button>
       </div>
@@ -278,6 +279,40 @@
             <button class="btn btn-sm" onclick="refreshInvoices()">🔄 Refresh</button>
           </div>
           <div id="allInvoicesTable"></div>
+        </div>
+      </div>
+
+      <!-- ══════════════════════════════════════════════════════════════════
+           TAB — HISTORY (MongoDB-backed persistent timeline)
+           ══════════════════════════════════════════════════════════════════ -->
+      <div id="tab-historyTab" class="hidden">
+        <div class="history-header">
+          <div>
+            <h2 class="history-title">📜 Transaction History</h2>
+            <p class="history-subtitle">Persistent record of all invoice events — survives network restarts</p>
+          </div>
+          <div style="display:flex;gap:0.5rem;align-items:center;">
+            <span id="historyCount" class="history-count"></span>
+            <button class="btn btn-sm" onclick="syncHistory()" id="syncBtn">🔄 Sync</button>
+          </div>
+        </div>
+
+        <!-- Filter pills -->
+        <div class="history-filters">
+          <button class="filter-pill active" data-filter="all" onclick="filterHistory(this)">All Events</button>
+          <button class="filter-pill" data-filter="InvoiceUploaded" onclick="filterHistory(this)">📤 Uploaded</button>
+          <button class="filter-pill" data-filter="BuyerApproved,AutoApproved" onclick="filterHistory(this)">✅ Approved</button>
+          <button class="filter-pill" data-filter="EscrowDeposited" onclick="filterHistory(this)">🔒 Escrowed</button>
+          <button class="filter-pill" data-filter="Financed,AutoFinanced" onclick="filterHistory(this)">💰 Financed</button>
+          <button class="filter-pill" data-filter="Paid" onclick="filterHistory(this)">✅ Paid</button>
+        </div>
+
+        <!-- Timeline -->
+        <div id="historyTimeline" class="history-timeline">
+          <div class="empty-state">
+            <div class="icon">📜</div>
+            <p>Loading history...</p>
+          </div>
         </div>
       </div>
 

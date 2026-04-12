@@ -35,11 +35,15 @@ const SMART_WALLET_ABI = [
 ];
 
 const BUNDLER_ABI = [
-  "function bundleOne(tuple(address sender, address target, bytes data, bytes signature, address paymaster) op) external",
+  "function bundleOne(tuple(address sender, address target, bytes data, bytes signature, address paymaster, uint256 nonce) op) external",
+];
+
+const ENTRYPOINT_ABI = [
+  "function nonces(address) view returns (uint256)",
 ];
 
 // ─── State ───────────────────────────────────────────────────────────────────
-let provider, relayerWallet, bundlerContract, config;
+let provider, relayerWallet, bundlerContract, entryPointContract, config;
 
 async function init() {
   // Load deployed config
@@ -56,6 +60,7 @@ async function init() {
   relayerWallet = new ethers.Wallet(relayerKey, provider);
 
   bundlerContract = new ethers.Contract(config.contracts.Bundler, BUNDLER_ABI, relayerWallet);
+  entryPointContract = new ethers.Contract(config.contracts.EntryPoint, ENTRYPOINT_ABI, provider);
 
   console.log("═══════════════════════════════════════════════════════");
   console.log("  ERC-4337 Bundler Relay Server");
@@ -69,7 +74,7 @@ async function init() {
 }
 
 // ─── Sign a UserOp ──────────────────────────────────────────────────────────
-async function signUserOp(op) {
+async function signUserOp(op, nonce) {
   // Get SmartWallet owner
   const smartWallet = new ethers.Contract(op.sender, SMART_WALLET_ABI, provider);
   const ownerAddr = (await smartWallet.owner()).toLowerCase();
@@ -81,11 +86,11 @@ async function signUserOp(op) {
 
   const signerWallet = new ethers.Wallet(privateKey);
 
-  // Hash: keccak256(abi.encode(sender, target, data)) — matches EntryPoint._verify
+  // Hash: keccak256(abi.encode(sender, target, data, nonce)) — matches EntryPoint._verify
   const abiCoder = ethers.AbiCoder.defaultAbiCoder();
   const encoded = abiCoder.encode(
-    ["address", "address", "bytes"],
-    [op.sender, op.target, op.data]
+    ["address", "address", "bytes", "uint256"],
+    [op.sender, op.target, op.data, nonce]
   );
   const hash = ethers.keccak256(encoded);
 
@@ -102,9 +107,11 @@ async function handleSubmit(op) {
   console.log(`   paymaster: ${op.paymaster}`);
   console.log(`   data:      ${op.data.slice(0, 20)}...`);
 
-  // Step 1: Sign the UserOp
-  const signature = await signUserOp(op);
-  console.log(`   ✅ Signed by SmartWallet owner`);
+  // Step 1: Get nonce from EntryPoint and sign the UserOp
+  const nonce = await entryPointContract.nonces(op.sender);
+  console.log(`   nonce:     ${nonce}`);
+  const signature = await signUserOp(op, nonce);
+  console.log(`   ✅ Signed by SmartWallet owner (with nonce ${nonce})`);
 
   // ─── AUTO-DEPOSIT INTERCEPTOR ───────────────────────────────────────────────
   // In our UserOp schema: op.target = contract address, op.data = raw calldata
@@ -186,6 +193,7 @@ async function handleSubmit(op) {
     data:      op.data,
     signature: signature,
     paymaster: op.paymaster,
+    nonce:     nonce,
   };
 
   // Step 3: Submit via Bundler.bundleOne()

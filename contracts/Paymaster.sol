@@ -103,6 +103,7 @@ contract Paymaster {
         bytes   data;
         bytes   signature;
         address paymaster;
+        uint256 nonce;
     }
 
     /**

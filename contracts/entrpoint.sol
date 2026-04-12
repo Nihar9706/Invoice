@@ -25,6 +25,7 @@ interface IPaymaster {
         bytes   data;
         bytes   signature;
         address paymaster;
+        uint256 nonce;
     }
 
     function validatePaymasterUserOp(
@@ -49,14 +50,18 @@ contract EntryPoint {
         address sender;       // SmartWallet address
         address target;       // contract to call
         bytes   data;         // calldata
-        bytes   signature;    // owner's signature over (sender, target, data)
+        bytes   signature;    // owner's signature over (sender, target, data, nonce)
         address paymaster;    // address(0) = user pays gas; else = gasless
+        uint256 nonce;        // replay protection — must match nonces[sender]
     }
 
     // ─── Deposit ledger ──────────────────────────────────────────────────────
     // Paymasters deposit ETH here. EntryPoint deducts gas costs from their
     // balance so the actual sender doesn't need any ETH.
     mapping(address => uint256) public deposits;
+
+    // ─── Nonce tracking (replay protection) ──────────────────────────────
+    mapping(address => uint256) public nonces;
 
     // ─── Events ──────────────────────────────────────────────────────────────
     event OperationExecuted(address indexed sender, address indexed target, bool sponsored);
@@ -133,7 +138,11 @@ contract EntryPoint {
 
     function handleOp(UserOperation calldata op) external {
 
-        // ── Step 1: Signature verification (unchanged from original) ─────────
+        // ── Step 0: Nonce check (replay protection) ─────────────────────────
+        require(op.nonce == nonces[op.sender], "EntryPoint: invalid nonce");
+        nonces[op.sender]++;
+
+        // ── Step 1: Signature verification ───────────────────────────────────
         require(_verify(op), "EntryPoint: invalid signature");
 
         bool sponsored = op.paymaster != address(0);
@@ -162,7 +171,8 @@ contract EntryPoint {
                         target:    op.target,
                         data:      op.data,
                         signature: op.signature,
-                        paymaster: op.paymaster
+                        paymaster: op.paymaster,
+                        nonce:     op.nonce
                     }),
                     opHash,
                     maxCost
@@ -206,8 +216,9 @@ contract EntryPoint {
     // =========================================================================
 
     function _verify(UserOperation calldata op) internal view returns (bool) {
+        // Include nonce in hash so signature is unique per nonce
         bytes32 hash = keccak256(
-            abi.encode(op.sender, op.target, op.data)
+            abi.encode(op.sender, op.target, op.data, op.nonce)
         );
 
         bytes32 ethSigned = keccak256(
@@ -221,7 +232,7 @@ contract EntryPoint {
     }
 
     function _hashOp(UserOperation calldata op) internal pure returns (bytes32) {
-        return keccak256(abi.encode(op.sender, op.target, op.data, op.paymaster));
+        return keccak256(abi.encode(op.sender, op.target, op.data, op.paymaster, op.nonce));
     }
 
     function _split(bytes memory sig)
