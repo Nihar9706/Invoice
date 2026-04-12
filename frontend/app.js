@@ -777,9 +777,12 @@ function renderInvoicesForRole() {
   }
 
   if (ROLE === "financier") {
-    const available = allInvoices.filter(i => !i.isPaid);
-    document.getElementById("financierInvoices").innerHTML = available.length
-      ? renderInvoiceTable(available, "financier")
+    // Show invoices the financier has funded, PLUS unfunded ones available to fund
+    const mine = allInvoices.filter(i =>
+      isMySmartWallet(i.financier) || (!i.financierFunded && !i.isPaid && i.buyerVerified)
+    );
+    document.getElementById("financierInvoices").innerHTML = mine.length
+      ? renderInvoiceTable(mine, "financier")
       : emptyState("📭", "No invoices available");
   }
 }
@@ -998,7 +1001,12 @@ function switchTab(el) {
   });
 
   // Auto-load history when History tab is opened
-  if (target === "historyTab" && connectedAddr) {
+  if (target === "historyTab") {
+    // Reset filter to "All Events" every time tab opens
+    document.querySelectorAll(".filter-pill").forEach(p => p.classList.remove("active"));
+    const allBtn = document.querySelector('.filter-pill[data-filter="all"]');
+    if (allBtn) allBtn.classList.add("active");
+    _currentHistoryFilter = "all";
     loadHistory();
   }
 }
@@ -1048,12 +1056,8 @@ let _currentHistoryFilter = "all";
 
 async function loadHistory() {
   try {
-    // Try to load role-specific history
-    const url = connectedAddr
-      ? `${HISTORY_API}/history/${connectedAddr}`
-      : `${HISTORY_API}/history`;
-
-    const resp = await fetch(url);
+    // Always load ALL events so every role sees the complete invoice lifecycle
+    const resp = await fetch(`${HISTORY_API}/history`);
     if (!resp.ok) throw new Error("History server not running");
     const data = await resp.json();
 
