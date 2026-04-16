@@ -104,7 +104,9 @@
               </div>
               <div class="form-group">
                 <label>Buyer Address</label>
-                <input type="text" id="invBuyer" placeholder="0x..." />
+                <select id="invBuyer" style="width:100%; padding: 0.8rem; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-secondary); color: var(--text-primary);">
+                  <!-- Options will be dynamically populated in app.js -->
+                </select>
               </div>
               <div class="form-group">
                 <label>Amount (ETH)</label>
@@ -257,14 +259,34 @@
           </div>
         </div>
 
-        <!-- ─── UNKNOWN ROLE ────────────────────────────────────────────── -->
+        <!-- ─── UNREGISTERED USER SECTION ───────────────────────────────── -->
         <div id="unknownSection" class="hidden">
-          <div class="card" style="text-align:center; padding:3rem;">
-            <h2>⚠️ Unknown Wallet</h2>
-            <p style="color:var(--text-secondary); margin-top:0.5rem;">
-              Your connected wallet is not assigned a role. Expected addresses:
-            </p>
-            <p class="addr" style="margin-top:1rem;" id="expectedAddrs"></p>
+          <div class="section-header">
+            <span class="icon">👋</span>
+            <h2>Welcome! Join the Platform</h2>
+            <span class="role-badge" style="background:#eab308;color:black;">UNREGISTERED</span>
+          </div>
+          <div class="card" style="max-width: 600px;">
+            <p style="margin-bottom: 1rem; color: var(--text-secondary);">Your current MetaMask account is not whitelisted. Request an account below to get your gasless SmartWallet deployed!</p>
+            <div class="form-group">
+              <label>Select Role</label>
+              <select id="whitelistRole" style="width:100%; padding: 0.8rem; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-secondary); color: var(--text-primary);">
+                <option value="supplier">Supplier</option>
+                <option value="buyer">Buyer</option>
+                <option value="financier">Financier</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>MetaMask Private Key <span style="color:var(--danger); font-size:0.8rem;">*(Required for local Auto-Signing)*</span></label>
+              <input type="password" id="whitelistPk" placeholder="e.g. 0xabcdef..." style="width:100%; padding: 0.8rem; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-secondary); color: var(--text-primary);" />
+              <p style="font-size:0.75rem; color:var(--text-secondary); margin-top:0.4rem;">Why? In a real dApp, you sign via a MetaMask prompt. This prototype demonstrates "Zero Popups", so the local server signs on your behalf automatically.</p>
+            </div>
+            <button class="btn btn-primary" onclick="requestJoin()" id="requestJoinBtn">
+              📨 Request Whitelist
+            </button>
+            <div id="requestJoinStatus" style="margin-top: 1rem; color: var(--success); display: none;">
+              ✅ Request sent! Waiting for Paymaster Admin to approve...
+            </div>
           </div>
         </div>
       </div>
@@ -360,6 +382,15 @@
               <label>Address to Whitelist</label>
               <input type="text" id="adminWhitelistAddr" placeholder="0x..." />
             </div>
+            <div class="form-group">
+              <label>Assign Role</label>
+              <select id="adminWhitelistRole" class="form-control" style="width:100%; margin-bottom: 1rem;">
+                <option value="Supplier">Supplier</option>
+                <option value="Buyer">Buyer</option>
+                <option value="Financier">Financier</option>
+                <option value="Admin">Admin</option>
+              </select>
+            </div>
             <div style="display:flex;gap:0.5rem;">
               <button class="btn btn-success btn-sm" onclick="adminAddUser()">✅ Add User</button>
               <button class="btn btn-danger btn-sm" onclick="adminRemoveUser()">❌ Remove User</button>
@@ -372,6 +403,16 @@
               <span class="card-title">💰 Paymaster Info</span>
             </div>
             <div id="paymasterInfo"></div>
+          </div>
+
+          <div class="card" style="grid-column: span 2;">
+            <div class="card-header">
+              <span class="card-title">📝 Pending Registration Requests</span>
+              <button class="btn btn-sm" onclick="loadPendingRequests()">🔄 Refresh</button>
+            </div>
+            <div id="adminPendingRequests">
+              <p style="color:var(--text-secondary);font-size:0.9rem;">No pending requests at the moment.</p>
+            </div>
           </div>
         </div>
       </div>

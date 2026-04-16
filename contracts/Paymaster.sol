@@ -1,16 +1,18 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
+
 /*
- * Paymaster — ERC-4337 compliant
+ * Paymaster — ERC-4337 compliant Verifying Paymaster
  *
  * Responsibilities:
- *  1. Whitelist financiers (same as before)
+ *  1. Verify backend oracle signature to whitelist financiers dynamically
  *  2. Accept ETH deposits staked inside EntryPoint so it can cover gas
  *  3. Implement validatePaymasterUserOp() so EntryPoint can ask
  *     "will you pay for this op?" before executing it
  *  4. Implement postOp() so EntryPoint can notify us after execution
- *     (we log it; in production you'd do accounting here)
  */
 
 interface IEntryPoint {
@@ -27,32 +29,31 @@ interface IEntryPoint {
 }
 
 contract Paymaster {
+    using ECDSA for bytes32;
 
     // ─── State ──────────────────────────────────────────────────────────────
     address public owner;
-    address public entryPoint;                         // the EntryPoint we're staked in
-
-    mapping(address => bool) public allowed;           // whitelisted wallets / financiers
+    address public entryPoint;
+    address public verifyingSigner; // Backend Oracle Signer
 
     // ─── Events ─────────────────────────────────────────────────────────────
-    event UserAdded(address indexed user);
-    event UserRemoved(address indexed user);
+    event VerifyingSignerChanged(address indexed newSigner);
     event GasSponsored(address indexed sender, address indexed target);
     event Deposited(uint256 amount);
     event Withdrawn(address indexed to, uint256 amount);
 
     // ─── Errors ─────────────────────────────────────────────────────────────
     error NotOwner();
-    error AlreadyAllowed();
-    error NotAllowed();
     error NotEntryPoint();
     error ZeroAddress();
 
     // ─── Constructor ────────────────────────────────────────────────────────
-    constructor(address _entryPoint) {
+    constructor(address _entryPoint, address _verifyingSigner) {
         if (_entryPoint == address(0)) revert ZeroAddress();
+        if (_verifyingSigner == address(0)) revert ZeroAddress();
         owner       = msg.sender;
         entryPoint  = _entryPoint;
+        verifyingSigner = _verifyingSigner;
     }
 
     // ─── Modifiers ──────────────────────────────────────────────────────────
@@ -67,54 +68,29 @@ contract Paymaster {
     }
 
     // =========================================================================
-    //  WHITELIST MANAGEMENT (unchanged logic, same as before)
+    //  ORACLE MANAGEMENT 
     // =========================================================================
 
-    function addUser(address user) external onlyOwner {
-        if (allowed[user]) revert AlreadyAllowed();
-        allowed[user] = true;
-        emit UserAdded(user);
-    }
-
-    function removeUser(address user) external onlyOwner {
-        if (!allowed[user]) revert NotAllowed();
-        allowed[user] = false;
-        emit UserRemoved(user);
-    }
-
-    /// @notice Used by InvoiceContract to check if a financier is whitelisted
-    function validate(address sender) external view returns (bool) {
-        return allowed[sender];
+    function setVerifyingSigner(address _verifyingSigner) external onlyOwner {
+        if (_verifyingSigner == address(0)) revert ZeroAddress();
+        verifyingSigner = _verifyingSigner;
+        emit VerifyingSignerChanged(_verifyingSigner);
     }
 
     // =========================================================================
     //  ERC-4337 — GASLESS CORE
-    //
-    //  How it works:
-    //   EntryPoint calls validatePaymasterUserOp() BEFORE executing the op.
-    //   If we return validationData == 0 (success), EntryPoint will deduct
-    //   the gas cost from our staked deposit instead of the sender's wallet.
-    //   postOp() is called AFTER execution so we can do any post-processing.
     // =========================================================================
 
     struct UserOperation {
         address sender;
         address target;
         bytes   data;
-        bytes   signature;
+        bytes   signature; 
         address paymaster;
+        bytes   paymasterData; // This will now contain the Backend Oracle Signature!
         uint256 nonce;
     }
 
-    /**
-     * @notice EntryPoint calls this to ask: "will you sponsor this op?"
-     * @dev    Return (context, 0)  → approved, gas comes from our deposit
-     *         Revert               → rejected, op fails
-     *
-     * We approve if the sender wallet is whitelisted.
-     * `context` is passed back into postOp() — we encode the sender so we
-     * can emit a useful event there.
-     */
     function validatePaymasterUserOp(
         UserOperation calldata op,
         bytes32  /*userOpHash*/,
@@ -125,20 +101,27 @@ contract Paymaster {
         onlyEntryPoint
         returns (bytes memory context, uint256 validationData)
     {
-        // Only sponsor ops from whitelisted senders
-        require(allowed[op.sender], "Paymaster: sender not whitelisted");
+        // 1. Reconstruct the hash that the backend signed
+        // We hash (sender, target, data, nonce) to ensure this specific action is approved.
+        bytes32 hash = keccak256(abi.encode(
+            op.sender,
+            op.target,
+            keccak256(op.data),
+            op.nonce
+        ));
+
+        // 2. Recover the signer from op.paymasterData
+        bytes32 ethSignedMessageHash = MessageHashUtils.toEthSignedMessageHash(hash);
+        address recoveredSigner = ECDSA.recover(ethSignedMessageHash, op.paymasterData);
+
+        // 3. Ensure the recovered signer is our trusted backend oracle
+        require(recoveredSigner == verifyingSigner, "Paymaster: backend signature invalid or unauthorized");
 
         // Encode sender + target into context so postOp can log them
         context        = abi.encode(op.sender, op.target);
         validationData = 0;   // 0 = valid, no expiry
     }
 
-    /**
-     * @notice EntryPoint calls this after the op executes (or if it reverts).
-     * @param  mode     0 = success, 1 = reverted (but we still pay), 2 = postOp itself reverted
-     * @param  context  whatever we returned from validatePaymasterUserOp
-     * @param  actualGasCost  actual gas used (in wei) — deducted from our deposit
-     */
     function postOp(
         uint8         mode,
         bytes calldata context,
@@ -152,49 +135,27 @@ contract Paymaster {
         if (mode == 0) {
             emit GasSponsored(sender, target);
         }
-
-        // actualGasCost has already been deducted from our EntryPoint deposit
-        // by the time postOp is called. Nothing extra to do here for basic use.
-        // In production: track per-user spend, enforce limits, etc.
-        // (actualGasCost is intentionally unused in this basic implementation)
     }
 
     // =========================================================================
-    //  DEPOSIT / STAKE MANAGEMENT
-    //
-    //  The Paymaster must have ETH sitting inside EntryPoint.
-    //  The owner calls depositToEntryPoint() to fund it.
-    //  Without this, validatePaymasterUserOp will pass but EntryPoint will
-    //  revert because there's nothing to pay gas from.
+    //  DEPOSIT MANAGEMENT
     // =========================================================================
 
-    /**
-     * @notice Fund this Paymaster's gas deposit inside EntryPoint.
-     *         Anyone can top it up, but typically the owner does.
-     */
     function depositToEntryPoint() external payable {
         require(msg.value > 0, "Send ETH to deposit");
         IEntryPoint(entryPoint).depositTo{value: msg.value}(address(this));
         emit Deposited(msg.value);
     }
 
-    /**
-     * @notice Withdraw from EntryPoint deposit back to this contract.
-     *         Only owner can do this.
-     */
     function withdrawFromEntryPoint(uint256 amount) external onlyOwner {
         IEntryPoint(entryPoint).withdrawTo(payable(address(this)), amount);
         emit Withdrawn(address(this), amount);
     }
 
-    /**
-     * @notice Check how much ETH this Paymaster has deposited in EntryPoint.
-     */
     function getDeposit() external view returns (uint256) {
         (uint112 deposit,,,,) = IEntryPoint(entryPoint).getDepositInfo(address(this));
         return uint256(deposit);
     }
 
-    // ─── Receive ETH (for withdrawFromEntryPoint to land) ───────────────────
     receive() external payable {}
 }

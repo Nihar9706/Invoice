@@ -21,6 +21,7 @@ interface IEntryPoint {
         bytes   data;
         bytes   signature;
         address paymaster;   // ← new field
+        bytes   paymasterData; // ← oracle signature
         uint256 nonce;       // ← replay protection
     }
 
@@ -38,6 +39,7 @@ contract Bundler {
         bytes   data;
         bytes   signature;
         address paymaster;   // address(0) = user pays gas; else = gasless
+        bytes   paymasterData; // oracle signature
         uint256 nonce;       // replay protection
     }
 
@@ -75,6 +77,7 @@ contract Bundler {
                 data:      ops[i].data,
                 signature: ops[i].signature,
                 paymaster: ops[i].paymaster,
+                paymasterData: ops[i].paymasterData,
                 nonce:     ops[i].nonce
             });
 
@@ -95,6 +98,7 @@ contract Bundler {
             data:      op.data,
             signature: op.signature,
             paymaster: op.paymaster,
+            paymasterData: op.paymasterData,
             nonce:     op.nonce
         });
 

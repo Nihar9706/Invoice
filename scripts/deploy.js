@@ -27,9 +27,13 @@ async function main() {
   await entryPoint.waitForDeployment();
   console.log("✅ EntryPoint deployed:    ", entryPoint.target);
 
-  // 2. Paymaster
+  // 2. Paymaster (Verifying Oracle)
+  // We generate a dedicated backend signer
+  const backendSigner = ethers.Wallet.createRandom();
+  console.log("   └─ Backend Oracle Signer:", backendSigner.address);
+
   const PM = await ethers.getContractFactory("Paymaster");
-  const paymaster = await PM.deploy(entryPoint.target);
+  const paymaster = await PM.deploy(entryPoint.target, backendSigner.address);
   await paymaster.waitForDeployment();
   console.log("✅ Paymaster deployed:     ", paymaster.target);
 
@@ -72,22 +76,14 @@ async function main() {
   await financierWallet.waitForDeployment();
   console.log("   ✅ Financier SmartWallet:", financierWallet.target);
 
-  // ─── Whitelist ALL users + SmartWallets in Paymaster ────────────────────────
-  console.log("\n─── Whitelisting in Paymaster ───");
-  // EOAs
-  await paymaster.connect(owner).addUser(ROLES.supplier);
-  console.log("   ✅ Supplier EOA whitelisted");
-  await paymaster.connect(owner).addUser(ROLES.buyer);
-  console.log("   ✅ Buyer EOA whitelisted");
-  await paymaster.connect(owner).addUser(ROLES.financier);
-  console.log("   ✅ Financier EOA whitelisted");
-  // SmartWallets
-  await paymaster.connect(owner).addUser(supplierWallet.target);
-  console.log("   ✅ Supplier SmartWallet whitelisted");
-  await paymaster.connect(owner).addUser(buyerWallet.target);
-  console.log("   ✅ Buyer SmartWallet whitelisted");
-  await paymaster.connect(owner).addUser(financierWallet.target);
-  console.log("   ✅ Financier SmartWallet whitelisted");
+  // ─── Whitelist ALL users in MOCK MongoDB (We save this for the backend) ───
+  console.log("\n─── Storing off-chain whitelist for Backend Oracle ───");
+  // The backend will read these to know who is allowed
+  const dynamicWhitelist = [
+    ROLES.supplier, ROLES.buyer, ROLES.financier,
+    supplierWallet.target, buyerWallet.target, financierWallet.target
+  ];
+  console.log("   ✅ " + dynamicWhitelist.length + " addresses added to off-chain config");
 
 
   // No pre-deposits — the bundler relay auto-deposits from EOA on demand
@@ -116,6 +112,11 @@ async function main() {
       buyer:     ROLES.buyer,
       financier: ROLES.financier,
     },
+    backendOracle: {
+      address: backendSigner.address,
+      privateKey: backendSigner.privateKey,
+      whitelistedAddresses: dynamicWhitelist
+    }
   };
 
   const frontendDir = path.join(__dirname, "..", "frontend");

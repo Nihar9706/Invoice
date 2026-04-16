@@ -25,6 +25,7 @@ interface IPaymaster {
         bytes   data;
         bytes   signature;
         address paymaster;
+        bytes   paymasterData;
         uint256 nonce;
     }
 
@@ -52,6 +53,7 @@ contract EntryPoint {
         bytes   data;         // calldata
         bytes   signature;    // owner's signature over (sender, target, data, nonce)
         address paymaster;    // address(0) = user pays gas; else = gasless
+        bytes   paymasterData;// oracle signature
         uint256 nonce;        // replay protection — must match nonces[sender]
     }
 
@@ -172,6 +174,7 @@ contract EntryPoint {
                         data:      op.data,
                         signature: op.signature,
                         paymaster: op.paymaster,
+                        paymasterData: op.paymasterData,
                         nonce:     op.nonce
                     }),
                     opHash,
@@ -232,7 +235,7 @@ contract EntryPoint {
     }
 
     function _hashOp(UserOperation calldata op) internal pure returns (bytes32) {
-        return keccak256(abi.encode(op.sender, op.target, op.data, op.paymaster, op.nonce));
+        return keccak256(abi.encode(op.sender, op.target, op.data, op.paymaster, op.paymasterData, op.nonce));
     }
 
     function _split(bytes memory sig)

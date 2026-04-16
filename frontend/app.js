@@ -52,10 +52,6 @@ const INVOICE_ABI = [
 ];
 
 const PAYMASTER_ABI = [
-  "function addUser(address user) external",
-  "function removeUser(address user) external",
-  "function validate(address sender) external view returns (bool)",
-  "function allowed(address) external view returns (bool)",
   "function getDeposit() external view returns (uint256)",
   "function owner() external view returns (address)",
 ];
@@ -108,14 +104,32 @@ async function sendUserOp(targetAddr, calldata) {
 
   const relayUrl = CONFIG.bundlerRelayUrl || "http://localhost:3001";
 
-  const response = await fetch(`${relayUrl}/submit-userop`, {
+  // Step 1: Request Oracle Ticket from backend
+  const oracleResponse = await fetch(`${relayUrl}/api/sign-paymaster-ticket`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       sender:    userSmartWallet,
       target:    targetAddr,
-      data:      calldata,
-      paymaster: CONFIG.contracts.Paymaster,
+      data:      calldata
+    }),
+  });
+  
+  const oracleResult = await oracleResponse.json();
+  if (!oracleResult.success) {
+    throw new Error(oracleResult.error || "Failed to get Paymaster Oracle signature");
+  }
+
+  // Step 2: Submit UserOp including the Paymaster Ticket
+  const response = await fetch(`${relayUrl}/submit-userop`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      sender:        userSmartWallet,
+      target:        targetAddr,
+      data:          calldata,
+      paymaster:     CONFIG.contracts.Paymaster,
+      paymasterData: oracleResult.signature,
     }),
   });
 
@@ -278,6 +292,9 @@ function detectRole() {
   } else if (addr === CONFIG.roles.owner.toLowerCase()) {
     ROLE = "admin";
     userSmartWallet = null; // admin uses direct calls
+  } else if (CONFIG.dynamicUsers && CONFIG.dynamicUsers[addr]) {
+    ROLE = CONFIG.dynamicUsers[addr].role;
+    userSmartWallet = CONFIG.dynamicUsers[addr].smartWallet;
   } else {
     ROLE = null;
     userSmartWallet = null;
@@ -328,25 +345,43 @@ function showRoleSection() {
     document.getElementById(id).classList.add("hidden");
   });
 
-  if (ROLE === "supplier") {
+  if (ROLE === "supplier" || ROLE === "admin") {
+    // Both supplier and admin use the supplierSection (Admin can impersonate for testing)
     document.getElementById("supplierSection").classList.remove("hidden");
-    // Pre-fill with BUYER's SmartWallet address (not EOA!)
-    document.getElementById("invBuyer").value = CONFIG.contracts.BuyerSmartWallet;
-    // Slider default is already set to 5 min in HTML
-  } else if (ROLE === "buyer") {
+    
+    // Populate the Buyer dropdown
+    const invBuyerSelect = document.getElementById("invBuyer");
+    if (invBuyerSelect) {
+      invBuyerSelect.innerHTML = ""; // Clear existing
+
+      // Add Default Hardhat Buyer
+      const defaultOpt = document.createElement("option");
+      defaultOpt.value = CONFIG.contracts.BuyerSmartWallet;
+      defaultOpt.textContent = `Default Buyer (${truncAddr(CONFIG.contracts.BuyerSmartWallet)})`;
+      invBuyerSelect.appendChild(defaultOpt);
+
+      // Add Dynamic Buyers
+      if (CONFIG.dynamicUsers) {
+        let count = 1;
+        for (const [eoa, data] of Object.entries(CONFIG.dynamicUsers)) {
+          if (data.role === "buyer" && data.smartWallet) {
+            const opt = document.createElement("option");
+            opt.value = data.smartWallet;
+            opt.textContent = `Buyer #${count} (${truncAddr(data.smartWallet)})`;
+            invBuyerSelect.appendChild(opt);
+            count++;
+          }
+        }
+      }
+    }
+  }
+
+  if (ROLE === "buyer") {
     document.getElementById("buyerSection").classList.remove("hidden");
   } else if (ROLE === "financier") {
     document.getElementById("financierSection").classList.remove("hidden");
-  } else if (ROLE === "admin") {
-    document.getElementById("supplierSection").classList.remove("hidden");
-  } else {
+  } else if (ROLE !== "supplier" && ROLE !== "admin") {
     document.getElementById("unknownSection").classList.remove("hidden");
-    document.getElementById("expectedAddrs").innerHTML = `
-      Supplier: ${CONFIG.roles.supplier}<br>
-      Buyer: ${CONFIG.roles.buyer}<br>
-      Financier: ${CONFIG.roles.financier}<br>
-      Admin: ${CONFIG.roles.owner}
-    `;
   }
 
   document.getElementById("adminTab").classList.toggle("hidden", ROLE !== "admin");
@@ -647,14 +682,22 @@ async function loadConditions() {
 
 async function adminAddUser() {
   const addr = document.getElementById("adminWhitelistAddr").value.trim();
+  const role = document.getElementById("adminWhitelistRole").value;
   if (!addr) return showToast("Enter address", "error");
+  
   try {
-    const tx = await paymasterContract.addUser(addr);
-    await tx.wait();
-    showToast(`✅ ${truncAddr(addr)} whitelisted`, "success");
+    const resp = await fetch(`http://localhost:3001/api/admin/add-user`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ wallet: addr, role })
+    });
+    const result = await resp.json();
+    if (!result.success) throw new Error(result.error);
+    
+    showToast(`✅ ${truncAddr(addr)} whitelisted in MongoDB`, "success");
     await loadAdminInfo();
   } catch (err) {
-    showToast("Failed: " + parseError(err), "error");
+    showToast("Failed: " + err.message, "error");
   }
 }
 
@@ -662,23 +705,31 @@ async function adminRemoveUser() {
   const addr = document.getElementById("adminWhitelistAddr").value.trim();
   if (!addr) return showToast("Enter address", "error");
   try {
-    const tx = await paymasterContract.removeUser(addr);
-    await tx.wait();
-    showToast(`✅ ${truncAddr(addr)} removed`, "success");
+    const resp = await fetch(`http://localhost:3001/api/admin/remove-user`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ wallet: addr })
+    });
+    const result = await resp.json();
+    if (!result.success) throw new Error(result.error);
+    
+    showToast(`✅ ${truncAddr(addr)} removed from MongoDB`, "success");
     await loadAdminInfo();
   } catch (err) {
-    showToast("Failed: " + parseError(err), "error");
+    showToast("Failed: " + err.message, "error");
   }
 }
 
 async function loadAdminInfo() {
   if (ROLE !== "admin") return;
   try {
+    // 1. Paymaster Deposit still on-chain
     const deposit = await paymasterReadContract.getDeposit();
 
-    const supSW = await paymasterReadContract.allowed(CONFIG.contracts.SupplierSmartWallet);
-    const buySW = await paymasterReadContract.allowed(CONFIG.contracts.BuyerSmartWallet);
-    const finSW = await paymasterReadContract.allowed(CONFIG.contracts.FinancierSmartWallet);
+    // 2. Fetch Whitelist from MongoDB (Level 1 Optimization)
+    const resp = await fetch(`http://localhost:3001/api/admin/users`);
+    const result = await resp.json();
+    const users = result.users || [];
 
     document.getElementById("paymasterInfo").innerHTML = `
       <div style="display:flex;flex-direction:column;gap:0.75rem;">
@@ -691,14 +742,22 @@ async function loadAdminInfo() {
       </div>
     `;
 
-    document.getElementById("whitelistStatus").innerHTML = `
-      <div style="font-size:0.85rem;">
-        <p><strong>SmartWallet Whitelist (ERC-4337):</strong></p>
-        <p>📦 Supplier SW: ${supSW ? '✅' : '❌'} <span class="addr">${truncAddr(CONFIG.contracts.SupplierSmartWallet)}</span></p>
-        <p>🛒 Buyer SW:    ${buySW ? '✅' : '❌'} <span class="addr">${truncAddr(CONFIG.contracts.BuyerSmartWallet)}</span></p>
-        <p>💰 Financier SW: ${finSW ? '✅' : '❌'} <span class="addr">${truncAddr(CONFIG.contracts.FinancierSmartWallet)}</span></p>
-      </div>
-    `;
+    let userListHtml = `<div style="font-size:0.85rem;"><p><strong>Off-Chain Whitelist (MongoDB):</strong></p>`;
+    if (users.length === 0) {
+      userListHtml += `<p style="color:var(--text-secondary);">No users whitelisted.</p>`;
+    } else {
+      users.forEach(u => {
+        userListHtml += `
+          <p style="margin-bottom:0.25rem;">
+            ${u.isWhitelisted ? '✅' : '❌'} <strong>${u.role}:</strong> 
+            <span class="addr">${truncAddr(u.address)}</span>
+            ${u.smartWallet ? ` ➔ SW: <span class="addr">${truncAddr(u.smartWallet)}</span>` : ''}
+          </p>`;
+      });
+    }
+    userListHtml += `</div>`;
+    document.getElementById("whitelistStatus").innerHTML = userListHtml;
+
   } catch (err) {
     console.error("Admin info error:", err);
   }
@@ -1272,6 +1331,85 @@ function renderHistoryTimeline(events) {
   }).join("");
 
   container.innerHTML = summaryHtml + timelineHtml;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  DYNAMIC REGISTRATION (Admin Approval Flow)
+// ═════════════════════════════════════════════════════════════════════════════
+
+async function requestJoin() {
+  const role = document.getElementById("whitelistRole").value;
+  const pk = document.getElementById("whitelistPk").value.trim();
+  
+  if (!pk || !pk.startsWith("0x") || pk.length !== 66) {
+    showToast("Please provide a valid 64-character hex private key starting with 0x", "error");
+    return;
+  }
+
+  const btn = document.getElementById("requestJoinBtn");
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Sending Request...';
+
+  try {
+    const res = await fetch(`${CONFIG.bundlerRelayUrl}/api/request-join`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ wallet: connectedAddr, role, pk })
+    });
+    if (!res.ok) throw new Error("Failed to send request");
+    
+    document.getElementById("requestJoinStatus").style.display = "block";
+    btn.innerHTML = '📨 Request Whitelist';
+  } catch (err) {
+    showToast(err.message, "error");
+    btn.disabled = false;
+    btn.innerHTML = '📨 Request Whitelist';
+  }
+}
+
+async function loadPendingRequests() {
+  const container = document.getElementById("adminPendingRequests");
+  if (!container) return;
+  
+  try {
+    const res = await fetch(`${CONFIG.bundlerRelayUrl}/api/pending-requests`);
+    const data = await res.json();
+    
+    if (!data.pendingRequests || data.pendingRequests.length === 0) {
+      container.innerHTML = '<p style="color:var(--text-secondary);font-size:0.9rem;">No pending requests at the moment.</p>';
+      return;
+    }
+
+    container.innerHTML = data.pendingRequests.map(r => `
+      <div style="background:var(--bg-lighter); padding:1rem; border-radius:8px; margin-bottom:0.5rem; display:flex; justify-content:space-between; align-items:center;">
+        <div>
+          <div style="font-family:monospace; color:var(--text-color); font-size:1.1rem;">${r.wallet}</div>
+          <div style="color:var(--text-secondary); font-size:0.85rem; margin-top:0.2rem;">Requested Role: <span style="color:var(--accent); text-transform:uppercase;">${r.role}</span></div>
+        </div>
+        <button class="btn btn-success btn-sm" onclick="approveJoin('${r.wallet}')">✅ Approve & Deploy</button>
+      </div>
+    `).join("");
+  } catch (err) {
+    container.innerHTML = `<p style="color:var(--danger);">Error loading requests</p>`;
+  }
+}
+
+async function approveJoin(wallet) {
+  showToast("Deploying SmartWallet and Whitelisting... this may take 5s", "neutral");
+  try {
+    const res = await fetch(`${CONFIG.bundlerRelayUrl}/api/approve-join`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ wallet })
+    });
+    const data = await res.json();
+    if (!data.success) throw new Error(data.error);
+    
+    showToast(`✅ Successfully registered user! SmartWallet: ${truncAddr(data.smartWallet)}`, "success");
+    await loadPendingRequests();
+  } catch (err) {
+    showToast(err.message, "error");
+  }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
