@@ -22,6 +22,12 @@ module.exports = {
       },
     },
 
+    // ─── Localhost (Default for npx hardhat node) ───────────────────────────
+    localhost: {
+      url: "http://127.0.0.1:8545",
+      chainId: 31337,
+    },
+
     // ── GoChain Testnet ───────────────────────────────────────────────────────
     // Chain ID: 31337 for GoChain testnet (same as Hardhat local — but different RPC)
     // Faucet: https://testnet-explorer.gochain.io/faucet

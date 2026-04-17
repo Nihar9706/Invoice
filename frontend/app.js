@@ -17,6 +17,7 @@ let CONFIG     = null;
 let ROLE       = null;
 let userSmartWallet = null;   // SmartWallet address for the connected user
 let allInvoices = [];
+const API_URL = "http://localhost:3003/api";
 let _refreshTimer = null;
 
 // ─── ABIs ─────────────────────────────────────────────────────────────────────
@@ -29,6 +30,8 @@ const INVOICE_ABI = [
   "function releaseDueDatePayment(uint256 id) external",
   "function setBuyerCondition(uint256 maxAmount, address allowedSupplier) external",
   "function setFinancierCondition(uint256 maxAmount, address allowedBuyer) external",
+  "function startBidding(uint256 id) external",
+  "function acceptBid(uint256 id, address winningFinancier) external",
   "function depositFunds() external payable",
   "function depositFor(address beneficiary) external payable",
   "function withdrawFunds(uint256 amount) external",
@@ -190,6 +193,9 @@ async function connectWallet() {
     // Check bundler relay health
     await checkBundlerRelay();
 
+    // Register/Check user in backend
+    await syncUserToBackend();
+
     updateHeader();
 
     document.getElementById("connectScreen").classList.add("hidden");
@@ -210,9 +216,59 @@ async function connectWallet() {
     const aaStatus = userSmartWallet ? "🔗 AA Enabled" : "⚠️ No SmartWallet";
     showToast(`Connected as ${ROLE || "Unknown"}: ${truncAddr(connectedAddr)} | ${aaStatus}`, "success");
 
+    // Start notification heartbeat (once connected)
+    startNotificationHeartbeat();
+
   } catch (err) {
     console.error("Connection failed:", err);
     showToast("Connection failed: " + (err.message || err), "error");
+  }
+}
+
+// ─── Notification Heartbeat (Persistent Consensus Alerts) ──────────────────
+let notificationCheckInterval = null;
+
+function startNotificationHeartbeat() {
+  if (notificationCheckInterval) clearInterval(notificationCheckInterval);
+  
+  // Initial check
+  checkUnreadNotifications();
+  
+  // Set interval (every 2 seconds for high-speed consensus feedback)
+  notificationCheckInterval = setInterval(checkUnreadNotifications, 2000);
+}
+
+async function checkUnreadNotifications() {
+  if (!connectedAddr) return;
+  
+  try {
+    const resp = await fetch(`${API_URL}/notifications/unread`, {
+      headers: { "x-wallet-address": connectedAddr }
+    });
+    const data = await resp.json();
+    
+    if (data.success && data.notifications.length > 0) {
+      for (const note of data.notifications) {
+        showToast(note.message, note.type || "info");
+        await acknowledgeNotification(note._id);
+        
+        // Immediate UI refresh upon consensus message
+        debouncedRefresh();
+      }
+    }
+  } catch (e) {
+    console.error("🔔 Heartbeat error:", e);
+  }
+}
+
+async function acknowledgeNotification(id) {
+  try {
+    await fetch(`${API_URL}/notifications/${id}/read`, {
+      method: "PATCH",
+      headers: { "x-wallet-address": connectedAddr }
+    });
+  } catch (e) {
+    console.warn("⚠️ Failed to acknowledge notification:", id);
   }
 }
 
@@ -229,6 +285,23 @@ async function checkBundlerRelay() {
     showToast("⚠️ Bundler relay not running! Start it: node scripts/bundler-relay.js", "error");
   }
   return false;
+}
+
+// ─── Backend Sync ─────────────────────────────────────────────────────────────
+async function syncUserToBackend() {
+  try {
+    // This will create the user in MongoDB if they don't exist
+    const resp = await fetch(`${API_URL}/voting/network-nodes`, {
+      headers: { "x-wallet-address": connectedAddr }
+    });
+    const data = await resp.json();
+    if (data.success) {
+      console.log("✅ User synced to backend");
+      renderGovernanceInfo(data.nodes);
+    }
+  } catch (e) {
+    console.warn("⚠️ Backend not reachable. Governance features disabled.");
+  }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -266,19 +339,33 @@ async function switchToHardhat() {
 
 function detectRole() {
   const addr = connectedAddr.toLowerCase();
-  if (addr === CONFIG.roles.supplier.toLowerCase()) {
+
+  // Search through all role arrays in CONFIG
+  const sIdx = CONFIG.roles.suppliers.findIndex(a => a.toLowerCase() === addr);
+  if (sIdx !== -1) {
     ROLE = "supplier";
-    userSmartWallet = CONFIG.contracts.SupplierSmartWallet;
-  } else if (addr === CONFIG.roles.buyer.toLowerCase()) {
+    userSmartWallet = CONFIG.contracts.SupplierWallets[sIdx];
+    return;
+  }
+
+  const bIdx = CONFIG.roles.buyers.findIndex(a => a.toLowerCase() === addr);
+  if (bIdx !== -1) {
     ROLE = "buyer";
-    userSmartWallet = CONFIG.contracts.BuyerSmartWallet;
-  } else if (addr === CONFIG.roles.financier.toLowerCase()) {
+    userSmartWallet = CONFIG.contracts.BuyerWallets[bIdx];
+    return;
+  }
+
+  const fIdx = CONFIG.roles.financiers.findIndex(a => a.toLowerCase() === addr);
+  if (fIdx !== -1) {
     ROLE = "financier";
-    userSmartWallet = CONFIG.contracts.FinancierSmartWallet;
-  } else if (addr === CONFIG.roles.owner.toLowerCase()) {
+    userSmartWallet = CONFIG.contracts.FinancierWallets[fIdx];
+    return;
+  }
+
+  if (addr === CONFIG.roles.owner.toLowerCase()) {
     ROLE = "admin";
-    userSmartWallet = null; // admin uses direct calls
-  } else {
+    userSmartWallet = null;
+  } else if (!ROLE) {
     ROLE = null;
     userSmartWallet = null;
   }
@@ -330,9 +417,7 @@ function showRoleSection() {
 
   if (ROLE === "supplier") {
     document.getElementById("supplierSection").classList.remove("hidden");
-    // Pre-fill with BUYER's SmartWallet address (not EOA!)
-    document.getElementById("invBuyer").value = CONFIG.contracts.BuyerSmartWallet;
-    // Slider default is already set to 5 min in HTML
+    populateBuyerDropdown();
   } else if (ROLE === "buyer") {
     document.getElementById("buyerSection").classList.remove("hidden");
   } else if (ROLE === "financier") {
@@ -340,16 +425,49 @@ function showRoleSection() {
   } else if (ROLE === "admin") {
     document.getElementById("supplierSection").classList.remove("hidden");
   } else {
+    const sStr = (CONFIG.roles.suppliers || []).join(", ");
+    const bStr = (CONFIG.roles.buyers || []).join(", ");
+    const fStr = (CONFIG.roles.financiers || []).join(", ");
+
     document.getElementById("unknownSection").classList.remove("hidden");
     document.getElementById("expectedAddrs").innerHTML = `
-      Supplier: ${CONFIG.roles.supplier}<br>
-      Buyer: ${CONFIG.roles.buyer}<br>
-      Financier: ${CONFIG.roles.financier}<br>
+      Suppliers: ${sStr || "none"}<br> 
+      Buyers: ${bStr || "none"}<br>
+      Financiers: ${fStr || "none"}<br>
       Admin: ${CONFIG.roles.owner}
     `;
   }
 
   document.getElementById("adminTab").classList.toggle("hidden", ROLE !== "admin");
+}
+
+/**
+ * Populate the Buyer dropdown for Suppliers
+ */
+function populateBuyerDropdown() {
+  const select = document.getElementById("invBuyer");
+  if (!select) return;
+  
+  if (!CONFIG || !CONFIG.roles.buyers || !CONFIG.contracts.BuyerWallets) {
+    console.warn("⚠️ No buyers found in CONFIG");
+    return;
+  }
+
+  select.innerHTML = ""; // Clear
+  
+  CONFIG.roles.buyers.forEach((eoa, idx) => {
+    const sw = CONFIG.contracts.BuyerWallets[idx];
+    if (!sw) return;
+
+    const op = document.createElement("option");
+    // We store the SmartWallet address as the value because the contract 
+    // expects the SmartWallet address for account abstraction flows.
+    op.value = sw; 
+    op.textContent = `Buyer ${idx + 1} (${truncAddr(eoa)})`;
+    select.appendChild(op);
+  });
+  
+  console.log(`✅ Populated Buyer dropdown with ${CONFIG.roles.buyers.length} buyers`);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -381,10 +499,11 @@ async function uploadInvoice() {
       return;
     }
 
-    // Resolve buyer address: if it matches the Buyer EOA, use their SmartWallet
-    let resolvedBuyer = buyerAddr;
-    if (buyerAddr.toLowerCase() === CONFIG.roles.buyer.toLowerCase()) {
-      resolvedBuyer = CONFIG.contracts.BuyerSmartWallet;
+    // Resolve buyer address: check if it matches any Buyer EOA
+    let resolvedBuyer = buyerAddr.toLowerCase();
+    const bIdx = (CONFIG.roles.buyers || []).findIndex(a => a.toLowerCase() === resolvedBuyer);
+    if (bIdx !== -1) {
+      resolvedBuyer = CONFIG.contracts.BuyerWallets[bIdx];
     }
 
     const amount  = ethers.parseEther(amtStr);
@@ -549,7 +668,8 @@ async function setFinancierCondition() {
 // ═════════════════════════════════════════════════════════════════════════════
 
 async function depositFunds() {
-  const amtStr = document.getElementById("depositAmount").value.trim();
+  const inputId = (ROLE === "buyer") ? "buyerDepositAmount" : "finDepositAmount";
+  const amtStr  = document.getElementById(inputId).value.trim();
   if (!amtStr || parseFloat(amtStr) <= 0) {
     showToast("Enter a valid deposit amount", "error");
     return;
@@ -561,7 +681,7 @@ async function depositFunds() {
     const tx = await invoiceContract.depositFor(userSmartWallet, { value: ethers.parseEther(amtStr) });
     await tx.wait();
     showToast(`✅ Deposited ${amtStr} ETH for SmartWallet! Auto-flow is funded.`, "success");
-    document.getElementById("depositAmount").value = "";
+    document.getElementById(inputId).value = "";
     await updateDepositBalance();
     await updateHeader();
   } catch (err) {
@@ -570,7 +690,9 @@ async function depositFunds() {
 }
 
 async function withdrawFunds() {
-  const amtStr = document.getElementById("depositAmount").value.trim();
+  const inputId = (ROLE === "buyer") ? "buyerDepositAmount" : "finDepositAmount";
+  const amtStr  = document.getElementById(inputId).value.trim();
+
   if (!amtStr || parseFloat(amtStr) <= 0) {
     showToast("Enter a valid withdraw amount", "error");
     return;
@@ -585,7 +707,7 @@ async function withdrawFunds() {
       [ethers.parseEther(amtStr)]
     );
     showToast(`✅ Withdrew ${amtStr} ETH via ERC-4337! (gasless)`, "success");
-    document.getElementById("depositAmount").value = "";
+    document.getElementById(inputId).value = "";
     await updateDepositBalance();
     await updateHeader();
   } catch (err) {
@@ -598,10 +720,11 @@ async function updateDepositBalance() {
   try {
     // Read deposit balance of the SmartWallet (not the EOA)
     const bal = await invoiceReadContract.deposits(userSmartWallet);
-    const el = document.getElementById("contractDeposit");
-    if (el) {
-      el.textContent = parseFloat(ethers.formatEther(bal)).toFixed(4) + " ETH";
-    }
+    const buyerEl = document.getElementById("buyerContractDeposit");
+    const finEl   = document.getElementById("finContractDeposit");
+    const valText = parseFloat(ethers.formatEther(bal)).toFixed(4) + " ETH";
+    if (buyerEl) buyerEl.textContent = valText;
+    if (finEl)   finEl.textContent   = valText;
   } catch (err) {
     console.error("Failed to read deposit balance:", err);
   }
@@ -712,6 +835,18 @@ async function refreshInvoices() {
   try {
     const count = Number(await invoiceReadContract.counter());
     allInvoices = [];
+    
+    // Fetch Metadata from Backend
+    let metaMap = {};
+    try {
+      const metaResp = await fetch(`${API_URL}/invoices/metadata`, {
+        headers: { "x-wallet-address": connectedAddr }
+      });
+      const metaData = await metaResp.json();
+      if (metaData.success) {
+        metaData.metadata.forEach(m => { metaMap[m.invoiceId] = m; });
+      }
+    } catch(e) { console.warn("Could not fetch invoice metadata:", e); }
 
     for (let i = 1; i <= count; i++) {
       const raw = await invoiceReadContract.invoices(i);
@@ -727,6 +862,7 @@ async function refreshInvoices() {
         isPaid:          raw[8],
         status:          raw[9],
         financier:       raw[10],
+        biddingTimeout:  metaMap[i]?.biddingTimeout ? Math.floor(new Date(metaMap[i].biddingTimeout).getTime() / 1000) : null
       });
     }
 
@@ -747,12 +883,19 @@ async function refreshInvoices() {
 function resolveAddr(addr) {
   if (!addr || !CONFIG) return truncAddr(addr);
   const a = addr.toLowerCase();
-  if (CONFIG.contracts.SupplierSmartWallet && a === CONFIG.contracts.SupplierSmartWallet.toLowerCase()) return "📦 Supplier";
-  if (CONFIG.contracts.BuyerSmartWallet && a === CONFIG.contracts.BuyerSmartWallet.toLowerCase()) return "🛒 Buyer";
-  if (CONFIG.contracts.FinancierSmartWallet && a === CONFIG.contracts.FinancierSmartWallet.toLowerCase()) return "💰 Financier";
-  if (a === CONFIG.roles.supplier.toLowerCase()) return "📦 Supplier";
-  if (a === CONFIG.roles.buyer.toLowerCase()) return "🛒 Buyer";
-  if (a === CONFIG.roles.financier.toLowerCase()) return "💰 Financier";
+
+  // Check SmartWallets
+  if (CONFIG.contracts.SupplierWallets?.some(sw => sw.toLowerCase() === a)) return "📦 Supplier SW";
+  if (CONFIG.contracts.BuyerWallets?.some(sw => sw.toLowerCase() === a)) return "🛒 Buyer SW";
+  if (CONFIG.contracts.FinancierWallets?.some(sw => sw.toLowerCase() === a)) return "💰 Financier SW";
+
+  // Check EOA Roles
+  if (CONFIG.roles.suppliers?.some(eoa => eoa.toLowerCase() === a)) return "📦 Supplier";
+  if (CONFIG.roles.buyers?.some(eoa => eoa.toLowerCase() === a)) return "🛒 Buyer";
+  if (CONFIG.roles.financiers?.some(eoa => eoa.toLowerCase() === a)) return "💰 Financier";
+
+  if (a === CONFIG.roles.owner.toLowerCase()) return "⚙️ Admin";
+
   return truncAddr(addr);
 }
 
@@ -806,6 +949,23 @@ function renderInvoiceTable(invoices, perspective) {
     let countdownHtml = "";
     if (inv.isPaid) {
       countdownHtml = `<span style="color:var(--paid);font-weight:600;">✅ Paid</span>`;
+    } else if (inv.status === "BIDDING" && inv.biddingTimeout) {
+      const bidSecsLeft = inv.biddingTimeout - now;
+      if (bidSecsLeft > 0) {
+        const mm = Math.floor(bidSecsLeft / 60);
+        const ss = bidSecsLeft % 60;
+        const pct = Math.max(0, Math.min(100, (bidSecsLeft / (10 * 60)) * 100)); // normalized to 10 mins for bar
+        countdownHtml = `
+          <div class="countdown-timer" data-due="${inv.biddingTimeout}" data-type="bidding">
+            <div style="font-size:0.75rem;color:var(--accent);margin-bottom:2px;font-weight:600;">🔥 BIDDING ENDS</div>
+            <span style="font-weight:700;font-size:0.95rem;color:var(--accent);">${String(mm).padStart(2,"0")}:${String(ss).padStart(2,"0")}</span>
+            <div style="height:4px;background:rgba(255,255,255,0.1);border-radius:2px;margin-top:3px;">
+              <div style="height:100%;width:${pct}%;background:var(--accent);border-radius:2px;transition:width 1s linear;"></div>
+            </div>
+          </div>`;
+      } else {
+        countdownHtml = `<span style="color:var(--accent);font-weight:600;" class="countdown-pulse">⌛ FINALIZING...</span>`;
+      }
     } else if (pastDue) {
       countdownHtml = `<span style="color:#ef4444;font-weight:600;" class="countdown-pulse">⏰ OVERDUE</span>`;
     } else {
@@ -833,9 +993,21 @@ function renderInvoiceTable(invoices, perspective) {
       }
     }
 
+    if (perspective === "supplier") {
+      if ((inv.status === "APPROVED" || inv.status === "ESCROWED") && !inv.financierFunded) {
+        actions += `<button class="btn btn-accent btn-sm" onclick="startBidding(${inv.id})">💎 Start Bidding</button>`;
+      }
+      if (inv.status === "BIDDING" && !inv.financierFunded) {
+        actions += `<button class="btn btn-accent btn-sm" onclick="viewBids(${inv.id})">👁️ View Bids</button>`;
+      }
+    }
+
     if (perspective === "financier") {
       if (inv.status === "ESCROWED" && !inv.financierFunded) {
         actions += `<button class="btn btn-purple btn-sm" onclick="fundInvoice(${inv.id})">💰 Fund (AA)</button>`;
+      }
+      if (inv.status === "BIDDING" && !inv.financierFunded) {
+        actions += `<button class="btn btn-purple btn-sm" onclick="submitBid(${inv.id})">💎 Submit Bid</button>`;
       }
     }
 
@@ -881,23 +1053,36 @@ function startCountdownTicker() {
     timers.forEach(el => {
       const due = parseInt(el.dataset.due, 10);
       const secsLeft = due - now;
+      const isBidding = el.getAttribute("data-type") === "bidding";
 
       if (secsLeft <= 0) {
-        el.innerHTML = `<span style="color:#ef4444;font-weight:600;" class="countdown-pulse">⏰ OVERDUE</span>`;
+        el.innerHTML = isBidding 
+          ? `<span style="color:var(--accent);font-weight:600;" class="countdown-pulse">⌛ FINALIZING...</span>`
+          : `<span style="color:#ef4444;font-weight:600;" class="countdown-pulse">⏰ OVERDUE</span>`;
         needsRefresh = true;
         return;
       }
 
       const mm = Math.floor(secsLeft / 60);
       const ss = secsLeft % 60;
-      const pct = Math.max(0, Math.min(100, (secsLeft / (30 * 60)) * 100));
-      const barColor = pct > 50 ? "#22c55e" : pct > 20 ? "#f59e0b" : "#ef4444";
-
-      el.innerHTML = `
-        <span style="font-weight:700;font-size:0.95rem;color:${barColor};">${String(mm).padStart(2,"0")}:${String(ss).padStart(2,"0")}</span>
-        <div style="height:4px;background:rgba(255,255,255,0.1);border-radius:2px;margin-top:3px;">
-          <div style="height:100%;width:${pct}%;background:${barColor};border-radius:2px;transition:width 1s linear;"></div>
-        </div>`;
+      
+      if (isBidding) {
+        const pct = Math.max(0, Math.min(100, (secsLeft / (10 * 60)) * 100));
+        el.innerHTML = `
+          <div style="font-size:0.75rem;color:var(--accent);margin-bottom:2px;font-weight:600;">🔥 BIDDING ENDS</div>
+          <span style="font-weight:700;font-size:0.95rem;color:var(--accent);">${String(mm).padStart(2,"0")}:${String(ss).padStart(2,"0")}</span>
+          <div style="height:4px;background:rgba(255,255,255,0.1);border-radius:2px;margin-top:3px;">
+            <div style="height:100%;width:${pct}%;background:var(--accent);border-radius:2px;transition:width 1s linear;"></div>
+          </div>`;
+      } else {
+        const pct = Math.max(0, Math.min(100, (secsLeft / (30 * 60)) * 100));
+        const barColor = pct > 50 ? "#22c55e" : pct > 20 ? "#f59e0b" : "#ef4444";
+        el.innerHTML = `
+          <span style="font-weight:700;font-size:0.95rem;color:${barColor};">${String(mm).padStart(2,"0")}:${String(ss).padStart(2,"0")}</span>
+          <div style="height:4px;background:rgba(255,255,255,0.1);border-radius:2px;margin-top:3px;">
+            <div style="height:100%;width:${pct}%;background:${barColor};border-radius:2px;transition:width 1s linear;"></div>
+          </div>`;
+      }
     });
 
     // When a timer hits zero, re-render to show the "Release" button
@@ -1275,8 +1460,262 @@ function renderHistoryTimeline(events) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  AUTO-INIT
+//  BIDDING SYSTEM LOGIC
 // ═════════════════════════════════════════════════════════════════════════════
+
+async function startBidding(id) {
+  const mins = prompt("Enter bidding duration in minutes (e.g. 10):", "5");
+  if (!mins || isNaN(mins)) return;
+
+  try {
+    showToast("⏳ Transitioning to bidding mode...", "info");
+    
+    // 1. Notify Backend of the timeout
+    const resp = await fetch(`${API_URL}/invoices/${id}/start-bidding`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-wallet-address": connectedAddr },
+        body: JSON.stringify({ timeoutMinutes: parseInt(mins) })
+    });
+    const data = await resp.json();
+    if (!data.success) throw new Error(data.message);
+
+    // 2. Execute on-chain startBidding
+    await sendAACall(INVOICE_ABI, CONFIG.contracts.InvoiceContract, "startBidding", [id]);
+    
+    showToast(`✅ Bidding started! Auto-electing winner in ${mins} minutes.`, "success");
+    await refreshInvoices();
+  } catch (err) {
+    showToast("Failed to start bidding: " + parseError(err), "error");
+  }
+}
+
+async function submitBid(invoiceId) {
+  const adv = prompt("Enter Advance Rate (%)", "");
+  const intr = prompt("Enter Interest Rate (%)", "");
+  if (!adv || !intr) return;
+
+  try {
+    const resp = await fetch(`${API_URL}/invoices/${invoiceId}/bids`, {
+      method: "POST",
+      headers: { 
+        "Content-Type": "application/json",
+        "x-wallet-address": connectedAddr 
+      },
+      body: JSON.stringify({ advanceRate: parseInt(adv), interestRate: parseInt(intr) })
+    });
+    const data = await resp.json();
+    if (data.success) {
+      showToast("✅ Bid submitted successfully!", "success");
+      await refreshInvoices();
+    }
+  } catch (err) {
+    showToast("Bid submission failed", "error");
+  }
+}
+
+async function acceptBid(invoiceId, bidId, winningFinancier) {
+  try {
+    showToast("⏳ Accepting bid on-chain...", "info");
+    
+    // 1. Mark as accepted in backend
+    await fetch(`${API_URL}/invoices/${invoiceId}/bids/${bidId}/accept`, {
+      method: "PATCH",
+      headers: { "x-wallet-address": connectedAddr }
+    });
+    
+    // 2. Execute on-chain transaction via AA
+    await sendAACall(INVOICE_ABI, CONFIG.contracts.InvoiceContract, "acceptBid", [invoiceId, winningFinancier]);
+    
+    showToast("✅ Bid accepted and invoice funded!", "success");
+    await refreshInvoices();
+  } catch (err) {
+    showToast("Failed to accept bid: " + parseError(err), "error");
+  }
+}
+
+async function viewBids(invoiceId) {
+    try {
+        const inv = allInvoices.find(i => i.id === invoiceId);
+        const panel = document.getElementById("supplierBiddingPanel");
+        const list = document.getElementById("supplierBidsList");
+        
+        // Always show the panel and clear old content immediately
+        panel.classList.remove("hidden");
+        list.innerHTML = `<p style="color:var(--text-secondary);text-align:center;padding:1rem;">⏳ Loading bids...</p>`;
+
+        // Build header with timer
+        let headerHtml = `<span class="card-title">💎 Active Bids — Invoice #${invoiceId}</span>`;
+        if (inv && inv.biddingTimeout) {
+            const now = Math.floor(Date.now() / 1000);
+            const secsLeft = inv.biddingTimeout - now;
+            if (secsLeft > 0) {
+                headerHtml += `<div class="countdown-timer" data-due="${inv.biddingTimeout}" data-type="bidding" style="margin-left: auto; text-align: right;">
+                    <div style="font-size:0.75rem;color:var(--accent);font-weight:600;margin-bottom:2px;">🔥 BIDDING ENDS</div>
+                    <span style="font-weight:700;font-size:0.95rem;color:var(--accent);">Loading...</span>
+                </div>`;
+            } else {
+                headerHtml += `<span style="color:var(--accent);font-weight:600;margin-left:auto;" class="countdown-pulse">⌛ FINALIZING...</span>`;
+            }
+        }
+        
+        const headerEl = panel.querySelector(".card-header");
+        if (headerEl) {
+            headerEl.innerHTML = headerHtml;
+            headerEl.style.display = "flex";
+            headerEl.style.justifyContent = "space-between";
+            headerEl.style.alignItems = "center";
+        }
+
+        // Fetch bids from MongoDB for THIS specific invoice
+        const resp = await fetch(`${API_URL}/invoices/${invoiceId}/bids`, {
+            headers: { "x-wallet-address": connectedAddr }
+        });
+        const data = await resp.json();
+
+        if (data.success && data.bids.length > 0) {
+            list.innerHTML = data.bids.map(b => `
+                <div class="card" style="margin-bottom:0.5rem; border-left: 4px solid var(--accent);">
+                    <p><strong>Financier:</strong> ${truncAddr(b.financerAddress)}</p>
+                    <p><strong>Advance:</strong> ${b.advanceRate}% | <strong>Interest:</strong> ${b.interestRate}%</p>
+                    <button class="btn btn-success btn-sm" onclick="acceptBid(${invoiceId}, '${b._id}', '${b.financerAddress}')">Accept Bid</button>
+                </div>
+            `).join("");
+        } else {
+            list.innerHTML = `<p style="color:var(--text-secondary);text-align:center;padding:2rem;">📭 No bids yet for Invoice #${invoiceId}. Waiting for financiers to bid...</p>`;
+        }
+    } catch (e) {
+        showToast("Failed to fetch bids: " + e.message, "error");
+    }
+
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  GOVERNANCE / VOTING LOGIC
+// ═════════════════════════════════════════════════════════════════════════════
+
+async function initiateVote() {
+  const targetId = document.getElementById("voteTargetSelect").value;
+  const reason = document.getElementById("voteReason").value.trim();
+  if (!targetId || !reason) return showToast("Select a target and provide a reason", "error");
+
+  const timeoutMinutes = document.getElementById("voteTimeout").value;
+
+  try {
+    const resp = await fetch(`${API_URL}/voting/initiate`, {
+      method: "POST",
+      headers: { 
+        "Content-Type": "application/json",
+        "x-wallet-address": connectedAddr 
+      },
+      body: JSON.stringify({ targetUserId: targetId, reason, timeoutMinutes })
+    });
+    const data = await resp.json();
+    if (data.success) {
+      showToast("✅ Voting session initiated!", "success");
+      refreshVotes();
+    } else {
+      showToast(data.message, "error");
+    }
+  } catch (e) {
+    showToast("Failed to initiate vote", "error");
+  }
+}
+
+async function castVote(sessionId, decision) {
+  try {
+    const resp = await fetch(`${API_URL}/voting/${sessionId}/vote`, {
+      method: "POST",
+      headers: { 
+        "Content-Type": "application/json",
+        "x-wallet-address": connectedAddr 
+      },
+      body: JSON.stringify({ decision })
+    });
+    const data = await resp.json();
+    if (data.success) {
+      showToast(`✅ Vote cast: ${decision}`, "success");
+      refreshVotes();
+    } else {
+      showToast(data.message, "error");
+    }
+  } catch (e) {
+    showToast("Failed to cast vote", "error");
+  }
+}
+
+async function refreshVotes() {
+  try {
+    const resp = await fetch(`${API_URL}/voting/active`, {
+      headers: { "x-wallet-address": connectedAddr }
+    });
+    const data = await resp.json();
+    if (data.success) {
+      renderActiveVotes(data.votes);
+    }
+  } catch (e) {}
+}
+
+function renderGovernanceInfo(nodes) {
+  const select = document.getElementById("voteTargetSelect");
+  if (!select) return;
+  select.innerHTML = nodes.map(n => `<option value="${n._id}">${n.walletAddress} (${n.role}) ${n.isSlashed ? '[SLASHED]' : ''}</option>`).join("");
+  refreshVotes();
+}
+
+function renderActiveVotes(votes) {
+  const list = document.getElementById("activeVotesList");
+  if (!list) return;
+  if (!votes.length) {
+    list.innerHTML = "<p style='color:var(--text-muted);'>No active voting sessions.</p>";
+    return;
+  }
+  list.innerHTML = votes.map(v => `
+    <div class="card" style="margin-bottom:0.5rem; border-left: 4px solid var(--danger);">
+      <p><strong>Target:</strong> ${v.targetUserId.walletAddress}</p>
+      <p><strong>Reason:</strong> ${v.reason}</p>
+      <p><strong>Progress:</strong> <span class="history-amount">${v.totalVotesCast} / ${v.requiredVotes}</span> votes received</p>
+      <div style="display:flex; gap:0.5rem; margin-top:0.5rem;">
+        <button class="btn btn-danger btn-sm" onclick="castVote('${v._id}', 'slash')" ${v.hasVoted ? 'disabled' : ''}>Slash</button>
+        <button class="btn btn-success btn-sm" onclick="castVote('${v._id}', 'keep')" ${v.hasVoted ? 'disabled' : ''}>Keep</button>
+      </div>
+    </div>
+  `).join("");
+}
+
+// ─── Utility ──────────────────────────────────────────────────────────────────
+
+function parseError(err) {
+  if (err.reason) return err.reason;
+  if (err.data && err.data.message) return err.data.message;
+  if (err.message) return err.message;
+  return "Unknown error";
+}
+
+function truncAddr(addr) {
+  if (!addr) return "";
+  return addr.slice(0, 6) + "…" + addr.slice(-4);
+}
+
+function switchTab(btn) {
+  const target = btn.getAttribute("data-tab");
+  document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+  btn.classList.add("active");
+
+  document.querySelectorAll("[id^='tab-']").forEach(div => div.classList.add("hidden"));
+  const tab = document.getElementById("tab-" + target);
+  if (tab) tab.classList.remove("hidden");
+  
+  if (target === "governanceTab") refreshVotes();
+}
+
+function showToast(msg, type) {
+  const container = document.getElementById("toastContainer");
+  const toast = document.createElement("div");
+  toast.className = `toast ${type}`;
+  toast.innerText = msg;
+  container.appendChild(toast);
+  setTimeout(() => toast.remove(), 4000);
+}
 
 (async function init() {
   if (window.ethereum) {

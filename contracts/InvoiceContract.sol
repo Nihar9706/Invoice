@@ -23,6 +23,7 @@ interface IPaymasterValidate {
 
 contract InvoiceContract {
 
+    address public owner;
     IPaymasterValidate public paymaster;
 
     // ─── Invoice ─────────────────────────────────────────────────────────────
@@ -97,6 +98,7 @@ contract InvoiceContract {
     // ─── Constructor ─────────────────────────────────────────────────────────
     constructor(address _paymaster) {
         require(_paymaster != address(0), "Zero paymaster address");
+        owner = msg.sender;
         paymaster = IPaymasterValidate(_paymaster);
     }
 
@@ -204,8 +206,37 @@ contract InvoiceContract {
 
         emit InvoiceUploaded(counter, msg.sender, buyer, amount);
 
-        // Run the full auto chain: approve → escrow → finance
+        // DEFAULT: Run the full auto chain: approve → escrow → finance
         _checkAutoApproval(counter);
+    }
+
+    // =========================================================================
+    //  BIDDING SYSTEM — 경쟁 입찰 (Competitive Bidding)
+    // =========================================================================
+
+    /**
+     * @notice Manually start bidding for an invoice. 
+     *         Overrides the auto-financing flow.
+     */
+    function startBidding(uint256 id) external {
+        Invoice storage inv = invoices[id];
+        require(msg.sender == inv.supplier, "Only supplier can start bidding");
+        require(inv.buyerVerified, "Invoice must be approved first");
+        
+        inv.status = "BIDDING";
+    }
+
+    /**
+     * @notice Accept a specific bid (called by supplier or backend authorized)
+     */
+    function acceptBid(uint256 id, address winningFinancier) external {
+        Invoice storage inv = invoices[id];
+        require(msg.sender == inv.supplier || msg.sender == owner, "Only supplier or owner can accept bids");
+        require(keccak256(bytes(inv.status)) == keccak256(bytes("BIDDING")), "Not in bidding status");
+        require(inv.escrowLocked, "Escrow must be locked first");
+        require(!inv.financierFunded, "Already funded");
+
+        _executeFinancing(id, winningFinancier);
     }
 
     // =========================================================================
@@ -385,8 +416,9 @@ contract InvoiceContract {
             bool buyerOk  = fc.allowedBuyer == address(0) || fc.allowedBuyer == inv.buyer;
             bool stillWhitelisted = paymaster.validate(fin);
             bool hasBalance = deposits[fin] >= (inv.amount * 90) / 100;
+            bool isBidding = keccak256(bytes(inv.status)) == keccak256(bytes("BIDDING"));
 
-            if (amountOk && buyerOk && stillWhitelisted && hasBalance) {
+            if (amountOk && buyerOk && stillWhitelisted && hasBalance && !isBidding) {
                 _executeFinancing(id, fin);
                 return;
             }
@@ -401,6 +433,7 @@ contract InvoiceContract {
         Invoice storage inv = invoices[id];
 
         uint256 supplierPayout = (inv.amount * 90) / 100;
+        require(deposits[fin] >= supplierPayout, "Financier has insufficient deposit");
 
         // Deduct from financier's pre-deposited balance
         deposits[fin] -= supplierPayout;

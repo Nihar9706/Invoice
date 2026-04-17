@@ -78,6 +78,7 @@
       <div class="tabs">
         <button class="tab active" data-tab="myDashboard" onclick="switchTab(this)">📋 My Dashboard</button>
         <button class="tab" data-tab="allInvoices" onclick="switchTab(this)">📑 All Invoices</button>
+        <button class="tab" data-tab="governanceTab" onclick="switchTab(this)">⚖️ Governance</button>
         <button class="tab" data-tab="historyTab" onclick="switchTab(this)">📜 History</button>
         <button class="tab" data-tab="activityFeed" onclick="switchTab(this)">⚡ Activity</button>
         <button class="tab" data-tab="adminPanel" onclick="switchTab(this)" id="adminTab">⚙️ Admin</button>
@@ -104,7 +105,7 @@
               </div>
               <div class="form-group">
                 <label>Buyer Address</label>
-                <input type="text" id="invBuyer" placeholder="0x..." />
+                <select id="invBuyer"></select>
               </div>
               <div class="form-group">
                 <label>Amount (ETH)</label>
@@ -132,6 +133,14 @@
               </div>
               <div id="supplierInvoices"></div>
             </div>
+
+            <!-- Bidding Panel (Supplier) -->
+            <div id="supplierBiddingPanel" class="card hidden">
+              <div class="card-header">
+                <span class="card-title">💎 Active Bids</span>
+              </div>
+              <div id="supplierBidsList"></div>
+            </div>
           </div>
         </div>
 
@@ -143,47 +152,10 @@
             <span class="role-badge buyer">BUYER</span>
           </div>
 
-          <!-- Deposit Pool -->
-          <div class="card" style="margin-bottom:1.5rem;">
-            <div class="card-header">
-              <span class="card-title">💳 Pre-Deposit Pool (for Auto-Escrow)</span>
-              <span style="font-size:1.1rem;font-weight:700;color:var(--accent)" id="contractDeposit">0.0000 ETH</span>
-            </div>
-            <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:1rem;">
-              Pre-deposit ETH here so invoices can be <strong>auto-escrowed</strong> without any MetaMask popups.
-              When a supplier uploads an invoice that matches your condition, escrow is locked automatically from this balance.
-            </p>
-            <div style="display:flex;gap:0.5rem;align-items:end;">
-              <div class="form-group" style="flex:1;margin-bottom:0;">
-                <label>Amount (ETH)</label>
-                <input type="number" id="depositAmount" placeholder="e.g. 10" step="0.01" min="0.01" />
-              </div>
-              <button class="btn btn-success" onclick="depositFunds()" style="height:42px;">⬆️ Deposit</button>
-              <button class="btn btn-danger" onclick="withdrawFunds()" style="height:42px;">⬇️ Withdraw</button>
-            </div>
-          </div>
 
-          <div class="dashboard-grid grid-2">
-            <!-- Auto-Approve Conditions -->
-            <div class="card">
-              <div class="card-header">
-                <span class="card-title">⚙️ Auto-Approve Conditions</span>
-              </div>
-              <div id="buyerCondStatus" class="condition-status">
-                ❌ No auto-approve condition set — all invoices need manual approval
-              </div>
-              <div class="form-group">
-                <label>Max Auto-Approve Amount (ETH)</label>
-                <input type="number" id="buyerMaxAmt" placeholder="e.g. 20" step="0.01" />
-              </div>
-              <div class="form-group">
-                <label>Allowed Supplier (leave empty for any)</label>
-                <input type="text" id="buyerAllowedSupplier" placeholder="0x... or leave empty" />
-              </div>
-              <button class="btn btn-primary" onclick="setBuyerCondition()">
-                💾 Save Condition
-              </button>
-            </div>
+
+          <div style="width: 100%; margin-top: 1rem;">
+
 
             <!-- Pending Invoices for Buyer -->
             <div class="card">
@@ -204,47 +176,10 @@
             <span class="role-badge financier">FINANCIER</span>
           </div>
 
-          <!-- Deposit Pool -->
-          <div class="card" style="margin-bottom:1.5rem;">
-            <div class="card-header">
-              <span class="card-title">💳 Pre-Deposit Pool (for Auto-Funding)</span>
-              <span style="font-size:1.1rem;font-weight:700;color:var(--accent)" id="contractDeposit">0.0000 ETH</span>
-            </div>
-            <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:1rem;">
-              Pre-deposit ETH here so invoices can be <strong>auto-funded</strong> without any MetaMask popups.
-              When an invoice matches your condition, the supplier gets paid 90% instantly from this balance.
-            </p>
-            <div style="display:flex;gap:0.5rem;align-items:end;">
-              <div class="form-group" style="flex:1;margin-bottom:0;">
-                <label>Amount (ETH)</label>
-                <input type="number" id="depositAmount" placeholder="e.g. 50" step="0.01" min="0.01" />
-              </div>
-              <button class="btn btn-success" onclick="depositFunds()" style="height:42px;">⬆️ Deposit</button>
-              <button class="btn btn-danger" onclick="withdrawFunds()" style="height:42px;">⬇️ Withdraw</button>
-            </div>
-          </div>
 
-          <div class="dashboard-grid grid-2">
-            <!-- Auto-Fund Conditions -->
-            <div class="card">
-              <div class="card-header">
-                <span class="card-title">⚙️ Auto-Fund Conditions</span>
-              </div>
-              <div id="finCondStatus" class="condition-status">
-                ❌ No auto-fund condition set — all invoices need manual funding
-              </div>
-              <div class="form-group">
-                <label>Max Auto-Fund Amount (ETH)</label>
-                <input type="number" id="finMaxAmt" placeholder="e.g. 50" step="0.01" />
-              </div>
-              <div class="form-group">
-                <label>Allowed Buyer (leave empty for any)</label>
-                <input type="text" id="finAllowedBuyer" placeholder="0x... or leave empty" />
-              </div>
-              <button class="btn btn-purple" onclick="setFinancierCondition()">
-                💾 Save Condition
-              </button>
-            </div>
+
+          <div style="width: 100%; margin-top: 1rem;">
+
 
             <!-- Invoices for Financier -->
             <div class="card">
@@ -266,6 +201,49 @@
             </p>
             <p class="addr" style="margin-top:1rem;" id="expectedAddrs"></p>
           </div>
+        </div>
+      </div>
+
+      <!-- ══════════════════════════════════════════════════════════════════
+           TAB — GOVERNANCE (Consensus Slashing)
+           ══════════════════════════════════════════════════════════════════ -->
+      <div id="tab-governanceTab" class="hidden">
+        <div class="dashboard-grid grid-2">
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">⚖️ Network Governance</span>
+                </div>
+                <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:1.5rem;">
+                    Initiate a consensus vote to slash malicious nodes. <strong>2/3 supermajority</strong> is required to remove a node from the system.
+                </p>
+                <div class="form-group">
+                    <label>Target Node (Wallet Address)</label>
+                    <select id="voteTargetSelect" class="form-control"></select>
+                </div>
+                <div class="form-group">
+                    <label>Reason for Slashing</label>
+                    <input type="text" id="voteReason" placeholder="e.g. Malicious behavior detected" />
+                </div>
+                <div class="form-group">
+                    <label>Voting Duration: <strong id="voteTimeLabel">60</strong> min</label>
+                    <input type="range" id="voteTimeout" min="5" max="1440" value="60" step="5" 
+                      oninput="document.getElementById('voteTimeLabel').textContent=this.value"
+                      style="width:100%;accent-color:var(--danger);" />
+                    <div style="display:flex;justify-content:space-between;font-size:0.7rem;color:var(--text-muted);">
+                      <span>5 min</span><span>12 hrs</span><span>24 hrs</span>
+                    </div>
+                </div>
+                <button class="btn btn-danger" onclick="initiateVote()" style="width:100%;margin-top:1rem;">
+                    ⚖️ Initiate Vote
+                </button>
+            </div>
+            
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">🗳️ Active Vote Sessions</span>
+                </div>
+                <div id="activeVotesList"></div>
+            </div>
         </div>
       </div>
 

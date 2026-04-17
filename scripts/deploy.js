@@ -4,21 +4,27 @@ const path = require("path");
 
 // ─── Hardcoded role addresses (Hardhat default accounts) ─────────────────────
 const ROLES = {
-  supplier:  "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
-  buyer:     "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
-  financier: "0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc",
+  suppliers: [
+    "0x8626f6940e2eb28930efb4cef49b2d1f2c9c1199",
+    "0xdd2fd4581271e230360230f9337d5c0430bf44c0",
+  ],
+  buyers: [
+    "0xbda5747bfd65f08deb54cb465eb87d40e51b197e",
+    "0xcd3b766ccdd6ae721141f452c550ca635964ce71",
+  ],
+  financiers: [
+    "0x2546bcd3c84621e976d8185a91a922ae77ecec30",
+    "0x71be63f3384f5fb98995898a86b02fb2426c5788",
+  ],
 };
 
 async function main() {
   const [owner] = await ethers.getSigners();
 
   console.log("═══════════════════════════════════════════════════════");
-  console.log("  Invoice Finance — ERC-4337 AA Deployment");
+  console.log("  Invoice Finance — MULTI-ROLE AA Deployment");
   console.log("═══════════════════════════════════════════════════════");
   console.log("  Deployer (owner):", owner.address);
-  console.log("  Supplier:        ", ROLES.supplier);
-  console.log("  Buyer:           ", ROLES.buyer);
-  console.log("  Financier:       ", ROLES.financier);
   console.log("───────────────────────────────────────────────────────\n");
 
   // 1. EntryPoint
@@ -33,10 +39,10 @@ async function main() {
   await paymaster.waitForDeployment();
   console.log("✅ Paymaster deployed:     ", paymaster.target);
 
-  // 3. Fund Paymaster deposit inside EntryPoint (covers gas for sponsored ops)
-  const pmFund = ethers.parseEther("10");
+  // 3. Fund Paymaster deposit inside EntryPoint
+  const pmFund = ethers.parseEther("20"); // More gas for more users
   await paymaster.connect(owner).depositToEntryPoint({ value: pmFund });
-  console.log("   └─ Paymaster funded with", ethers.formatEther(pmFund), "ETH in EntryPoint");
+  console.log("   └─ Paymaster funded with", ethers.formatEther(pmFund), "ETH");
 
   // 4. InvoiceContract
   const IC = await ethers.getContractFactory("InvoiceContract");
@@ -56,42 +62,31 @@ async function main() {
   await bundler.waitForDeployment();
   console.log("✅ Bundler deployed:       ", bundler.target);
 
-  // 7. SmartWallets for ALL roles (ERC-4337 AA)
-  console.log("\n─── Deploying SmartWallets (ERC-4337) ───");
+  // 7. SmartWallets (ERC-4337 AA)
+  console.log("\n─── Deploying SmartWallets (2 per role) ───");
   const SW = await ethers.getContractFactory("SmartWallet");
+  
+  const deployedSmartWallets = {
+    suppliers:  [],
+    buyers:     [],
+    financiers: [],
+  };
 
-  const supplierWallet = await SW.deploy(ROLES.supplier, entryPoint.target, paymaster.target);
-  await supplierWallet.waitForDeployment();
-  console.log("   ✅ Supplier SmartWallet: ", supplierWallet.target);
+  async function deployAndWhitelist(eoa, roleKey) {
+    const sw = await SW.deploy(eoa, entryPoint.target, paymaster.target);
+    await sw.waitForDeployment();
+    console.log(`   ✅ ${roleKey} SW: ${sw.target} (Owner: ${eoa.slice(0,8)}...)`);
+    
+    // Whitelist BOTH EOA and SmartWallet
+    await paymaster.connect(owner).addUser(eoa);
+    await paymaster.connect(owner).addUser(sw.target);
+    
+    deployedSmartWallets[roleKey].push(sw.target);
+  }
 
-  const buyerWallet = await SW.deploy(ROLES.buyer, entryPoint.target, paymaster.target);
-  await buyerWallet.waitForDeployment();
-  console.log("   ✅ Buyer SmartWallet:    ", buyerWallet.target);
-
-  const financierWallet = await SW.deploy(ROLES.financier, entryPoint.target, paymaster.target);
-  await financierWallet.waitForDeployment();
-  console.log("   ✅ Financier SmartWallet:", financierWallet.target);
-
-  // ─── Whitelist ALL users + SmartWallets in Paymaster ────────────────────────
-  console.log("\n─── Whitelisting in Paymaster ───");
-  // EOAs
-  await paymaster.connect(owner).addUser(ROLES.supplier);
-  console.log("   ✅ Supplier EOA whitelisted");
-  await paymaster.connect(owner).addUser(ROLES.buyer);
-  console.log("   ✅ Buyer EOA whitelisted");
-  await paymaster.connect(owner).addUser(ROLES.financier);
-  console.log("   ✅ Financier EOA whitelisted");
-  // SmartWallets
-  await paymaster.connect(owner).addUser(supplierWallet.target);
-  console.log("   ✅ Supplier SmartWallet whitelisted");
-  await paymaster.connect(owner).addUser(buyerWallet.target);
-  console.log("   ✅ Buyer SmartWallet whitelisted");
-  await paymaster.connect(owner).addUser(financierWallet.target);
-  console.log("   ✅ Financier SmartWallet whitelisted");
-
-
-  // No pre-deposits — the bundler relay auto-deposits from EOA on demand
-  // so MetaMask balances visibly change for both buyer AND financier
+  for (const eoa of ROLES.suppliers)  await deployAndWhitelist(eoa, "suppliers");
+  for (const eoa of ROLES.buyers)     await deployAndWhitelist(eoa, "buyers");
+  for (const eoa of ROLES.financiers) await deployAndWhitelist(eoa, "financiers");
 
   // ─── Save addresses to frontend config ─────────────────────────────────────
   const config = {
@@ -106,15 +101,15 @@ async function main() {
       InvoiceContract:      invoice.target,
       AutoKeeper:           autoKeeper.target,
       Bundler:              bundler.target,
-      SupplierSmartWallet:  supplierWallet.target,
-      BuyerSmartWallet:     buyerWallet.target,
-      FinancierSmartWallet: financierWallet.target,
+      SupplierWallets:      deployedSmartWallets.suppliers,
+      BuyerWallets:         deployedSmartWallets.buyers,
+      FinancierWallets:     deployedSmartWallets.financiers,
     },
     roles: {
-      owner:     owner.address,
-      supplier:  ROLES.supplier,
-      buyer:     ROLES.buyer,
-      financier: ROLES.financier,
+      owner:      owner.address,
+      suppliers:  ROLES.suppliers,
+      buyers:     ROLES.buyers,
+      financiers: ROLES.financiers,
     },
   };
 

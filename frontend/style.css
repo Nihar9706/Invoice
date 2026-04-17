@@ -223,6 +223,18 @@ body::before {
   color: white;
 }
 
+.btn-accent {
+  background: linear-gradient(135deg, #06b6d4, #0891b2);
+  border-color: transparent;
+  color: white;
+}
+
+.btn-cyan {
+  background: linear-gradient(135deg, #22d3ee, #0891b2);
+  border-color: transparent;
+  color: white;
+}
+
 .btn-sm {
   padding: 0.35rem 0.85rem;
   font-size: 0.78rem;

@@ -3,21 +3,39 @@
   "rpcUrl": "http://127.0.0.1:8545",
   "bundlerRelayUrl": "http://127.0.0.1:3001",
   "chainId": 31337,
-  "deployedAt": "2026-04-12T11:38:07.267Z",
+  "deployedAt": "2026-04-17T05:32:55.029Z",
   "contracts": {
     "EntryPoint": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
     "Paymaster": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
     "InvoiceContract": "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9",
     "AutoKeeper": "0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9",
     "Bundler": "0x5FC8d32690cc91D4c39d9d3abcBD16989F875707",
-    "SupplierSmartWallet": "0x0165878A594ca255338adfa4d48449f69242Eb8F",
-    "BuyerSmartWallet": "0xa513E6E4b8f2a923D98304ec87F64353C4D5C853",
-    "FinancierSmartWallet": "0x2279B7A0a67DB372996a5FaB50D91eAA73d2eBe6"
+    "SupplierWallets": [
+      "0x0165878A594ca255338adfa4d48449f69242Eb8F",
+      "0x8A791620dd6260079BF849Dc5567aDC3F2FdC318"
+    ],
+    "BuyerWallets": [
+      "0xA51c1fc2f0D1a1b8494Ed1FE312d7C3a78Ed91C0",
+      "0x0B306BF915C4d645ff596e518fAf3F9669b97016"
+    ],
+    "FinancierWallets": [
+      "0x68B1D87F95878fE05B998F19b66F4baba5De1aed",
+      "0x59b670e9fA9D0A427751Af201D676719a970857b"
+    ]
   },
   "roles": {
     "owner": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
-    "supplier": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
-    "buyer": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
-    "financier": "0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc"
+    "suppliers": [
+      "0x8626f6940e2eb28930efb4cef49b2d1f2c9c1199",
+      "0xdd2fd4581271e230360230f9337d5c0430bf44c0"
+    ],
+    "buyers": [
+      "0xbda5747bfd65f08deb54cb465eb87d40e51b197e",
+      "0xcd3b766ccdd6ae721141f452c550ca635964ce71"
+    ],
+    "financiers": [
+      "0x2546bcd3c84621e976d8185a91a922ae77ecec30",
+      "0x71be63f3384f5fb98995898a86b02fb2426c5788"
+    ]
   }
 }
