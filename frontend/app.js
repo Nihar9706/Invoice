@@ -13,8 +13,8 @@
 let provider, readProvider, signer, connectedAddr;
 let invoiceContract, invoiceReadContract, paymasterContract, paymasterReadContract;
 let autoKeeperContract, smartWalletContract;
-let CONFIG     = null;
-let ROLE       = null;
+let CONFIG = null;
+let ROLE = null;
 let userSmartWallet = null;   // SmartWallet address for the connected user
 let allInvoices = [];
 const API_URL = "http://localhost:3003/api";
@@ -115,9 +115,9 @@ async function sendUserOp(targetAddr, calldata) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      sender:    userSmartWallet,
-      target:    targetAddr,
-      data:      calldata,
+      sender: userSmartWallet,
+      target: targetAddr,
+      data: calldata,
       paymaster: CONFIG.contracts.Paymaster,
     }),
   });
@@ -162,7 +162,7 @@ async function connectWallet() {
     readProvider = new ethers.JsonRpcProvider(CONFIG.rpcUrl);
 
     provider = new ethers.BrowserProvider(window.ethereum);
-    signer   = await provider.getSigner();
+    signer = await provider.getSigner();
 
     // We MUST check MetaMask's active chain, not the direct node's chain
     const network = await provider.getNetwork();
@@ -174,12 +174,12 @@ async function connectWallet() {
     }
 
     // Read contracts — use readProvider (no MetaMask cache issues)
-    invoiceReadContract  = new ethers.Contract(CONFIG.contracts.InvoiceContract, INVOICE_ABI, readProvider);
+    invoiceReadContract = new ethers.Contract(CONFIG.contracts.InvoiceContract, INVOICE_ABI, readProvider);
     paymasterReadContract = new ethers.Contract(CONFIG.contracts.Paymaster, PAYMASTER_ABI, readProvider);
 
     // Write contracts — use signer (for direct payable calls)
-    invoiceContract    = new ethers.Contract(CONFIG.contracts.InvoiceContract, INVOICE_ABI, signer);
-    paymasterContract  = new ethers.Contract(CONFIG.contracts.Paymaster, PAYMASTER_ABI, signer);
+    invoiceContract = new ethers.Contract(CONFIG.contracts.InvoiceContract, INVOICE_ABI, signer);
+    paymasterContract = new ethers.Contract(CONFIG.contracts.Paymaster, PAYMASTER_ABI, signer);
     autoKeeperContract = new ethers.Contract(CONFIG.contracts.AutoKeeper, AUTOKEEPER_ABI, signer);
 
     // Detect role & SmartWallet
@@ -211,7 +211,7 @@ async function connectWallet() {
     setupEventListeners();
 
     window.ethereum.on("accountsChanged", () => location.reload());
-    window.ethereum.on("chainChanged",   () => location.reload());
+    window.ethereum.on("chainChanged", () => location.reload());
 
     const aaStatus = userSmartWallet ? "🔗 AA Enabled" : "⚠️ No SmartWallet";
     showToast(`Connected as ${ROLE || "Unknown"}: ${truncAddr(connectedAddr)} | ${aaStatus}`, "success");
@@ -230,28 +230,28 @@ let notificationCheckInterval = null;
 
 function startNotificationHeartbeat() {
   if (notificationCheckInterval) clearInterval(notificationCheckInterval);
-  
+
   // Initial check
   checkUnreadNotifications();
-  
+
   // Set interval (every 2 seconds for high-speed consensus feedback)
   notificationCheckInterval = setInterval(checkUnreadNotifications, 2000);
 }
 
 async function checkUnreadNotifications() {
   if (!connectedAddr) return;
-  
+
   try {
     const resp = await fetch(`${API_URL}/notifications/unread`, {
       headers: { "x-wallet-address": connectedAddr }
     });
     const data = await resp.json();
-    
+
     if (data.success && data.notifications.length > 0) {
       for (const note of data.notifications) {
         showToast(note.message, note.type || "info");
         await acknowledgeNotification(note._id);
-        
+
         // Immediate UI refresh upon consensus message
         debouncedRefresh();
       }
@@ -320,7 +320,7 @@ async function switchToHardhat() {
       await window.ethereum.request({
         method: "wallet_addEthereumChain",
         params: [{
-          chainId:  "0x" + CONFIG.chainId.toString(16),
+          chainId: "0x" + CONFIG.chainId.toString(16),
           chainName: "Hardhat Local",
           nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 },
           rpcUrls: [CONFIG.rpcUrl],
@@ -400,8 +400,8 @@ async function updateHeader() {
   const roleBadge = document.getElementById("roleBadge");
   if (ROLE) {
     roleBadge.textContent = ROLE === "admin" ? "⚙️ Admin" :
-                            ROLE === "supplier" ? "📦 Supplier" :
-                            ROLE === "buyer" ? "🛒 Buyer" : "💰 Financier";
+      ROLE === "supplier" ? "📦 Supplier" :
+        ROLE === "buyer" ? "🛒 Buyer" : "💰 Financier";
     roleBadge.className = `role-badge ${ROLE}`;
     roleBadge.classList.remove("hidden");
   }
@@ -447,14 +447,14 @@ function showRoleSection() {
 function populateBuyerDropdown() {
   const select = document.getElementById("invBuyer");
   if (!select) return;
-  
+
   if (!CONFIG || !CONFIG.roles.buyers || !CONFIG.contracts.BuyerWallets) {
     console.warn("⚠️ No buyers found in CONFIG");
     return;
   }
 
   select.innerHTML = ""; // Clear
-  
+
   CONFIG.roles.buyers.forEach((eoa, idx) => {
     const sw = CONFIG.contracts.BuyerWallets[idx];
     if (!sw) return;
@@ -462,11 +462,11 @@ function populateBuyerDropdown() {
     const op = document.createElement("option");
     // We store the SmartWallet address as the value because the contract 
     // expects the SmartWallet address for account abstraction flows.
-    op.value = sw; 
+    op.value = sw;
     op.textContent = `Buyer ${idx + 1} (${truncAddr(eoa)})`;
     select.appendChild(op);
   });
-  
+
   console.log(`✅ Populated Buyer dropdown with ${CONFIG.roles.buyers.length} buyers`);
 }
 
@@ -487,7 +487,7 @@ async function uploadInvoice() {
 
   try {
     const buyerAddr = document.getElementById("invBuyer").value.trim();
-    const amtStr  = document.getElementById("invAmount").value.trim();
+    const amtStr = document.getElementById("invAmount").value.trim();
     const dueMins = parseInt(document.getElementById("invDueMins").value, 10);
 
     if (!buyerAddr || !amtStr) {
@@ -506,7 +506,7 @@ async function uploadInvoice() {
       resolvedBuyer = CONFIG.contracts.BuyerWallets[bIdx];
     }
 
-    const amount  = ethers.parseEther(amtStr);
+    const amount = ethers.parseEther(amtStr);
 
     // Use the blockchain's own timestamp (not browser clock) to avoid
     // "Due date in the past" errors from clock skew or evm_increaseTime
@@ -608,7 +608,7 @@ async function triggerKeeper() {
 // ═════════════════════════════════════════════════════════════════════════════
 
 async function setBuyerCondition() {
-  const maxAmt   = document.getElementById("buyerMaxAmt").value.trim();
+  const maxAmt = document.getElementById("buyerMaxAmt").value.trim();
   const supplier = document.getElementById("buyerAllowedSupplier").value.trim();
 
   if (!maxAmt) {
@@ -616,7 +616,7 @@ async function setBuyerCondition() {
     return;
   }
 
-  const amount          = ethers.parseEther(maxAmt);
+  const amount = ethers.parseEther(maxAmt);
   const allowedSupplier = supplier || ethers.ZeroAddress;
 
   try {
@@ -636,14 +636,14 @@ async function setBuyerCondition() {
 
 async function setFinancierCondition() {
   const maxAmt = document.getElementById("finMaxAmt").value.trim();
-  const buyer  = document.getElementById("finAllowedBuyer").value.trim();
+  const buyer = document.getElementById("finAllowedBuyer").value.trim();
 
   if (!maxAmt) {
     showToast("Enter max auto-fund amount", "error");
     return;
   }
 
-  const amount       = ethers.parseEther(maxAmt);
+  const amount = ethers.parseEther(maxAmt);
   const allowedBuyer = buyer || ethers.ZeroAddress;
 
   try {
@@ -669,7 +669,7 @@ async function setFinancierCondition() {
 
 async function depositFunds() {
   const inputId = (ROLE === "buyer") ? "buyerDepositAmount" : "finDepositAmount";
-  const amtStr  = document.getElementById(inputId).value.trim();
+  const amtStr = document.getElementById(inputId).value.trim();
   if (!amtStr || parseFloat(amtStr) <= 0) {
     showToast("Enter a valid deposit amount", "error");
     return;
@@ -691,7 +691,7 @@ async function depositFunds() {
 
 async function withdrawFunds() {
   const inputId = (ROLE === "buyer") ? "buyerDepositAmount" : "finDepositAmount";
-  const amtStr  = document.getElementById(inputId).value.trim();
+  const amtStr = document.getElementById(inputId).value.trim();
 
   if (!amtStr || parseFloat(amtStr) <= 0) {
     showToast("Enter a valid withdraw amount", "error");
@@ -718,50 +718,22 @@ async function withdrawFunds() {
 async function updateDepositBalance() {
   if (!invoiceReadContract || !userSmartWallet) return;
   try {
-    // Read deposit balance of the SmartWallet (not the EOA)
-    const bal = await invoiceReadContract.deposits(userSmartWallet);
     const buyerEl = document.getElementById("buyerContractDeposit");
-    const finEl   = document.getElementById("finContractDeposit");
+    const finEl = document.getElementById("finContractDeposit");
+    if (!buyerEl && !finEl) return; // UI components removed
+
+    const bal = await invoiceReadContract.deposits(userSmartWallet);
     const valText = parseFloat(ethers.formatEther(bal)).toFixed(4) + " ETH";
     if (buyerEl) buyerEl.textContent = valText;
-    if (finEl)   finEl.textContent   = valText;
+    if (finEl) finEl.textContent = valText;
   } catch (err) {
     console.error("Failed to read deposit balance:", err);
   }
 }
 
 async function loadConditions() {
-  try {
-    // Buyer condition — indexed by SmartWallet address
-    if (ROLE === "buyer" && userSmartWallet) {
-      const [maxAmt, allowedSupplier] = await invoiceReadContract.buyerConditions(userSmartWallet);
-      const el = document.getElementById("buyerCondStatus");
-      if (maxAmt > 0n) {
-        const supText = allowedSupplier === ethers.ZeroAddress ? "any supplier" : truncAddr(allowedSupplier);
-        el.className = "condition-status active";
-        el.textContent = `✅ Active: auto-approve ≤ ${ethers.formatEther(maxAmt)} ETH from ${supText}`;
-      } else {
-        el.className = "condition-status";
-        el.textContent = "❌ No auto-approve condition set — all invoices need manual approval";
-      }
-    }
-
-    // Financier condition — indexed by SmartWallet address
-    if (ROLE === "financier" && userSmartWallet) {
-      const [maxAmt, allowedBuyer] = await invoiceReadContract.financierConditions(userSmartWallet);
-      const el = document.getElementById("finCondStatus");
-      if (maxAmt > 0n) {
-        const bText = allowedBuyer === ethers.ZeroAddress ? "any buyer" : truncAddr(allowedBuyer);
-        el.className = "condition-status active";
-        el.textContent = `✅ Active: auto-fund ≤ ${ethers.formatEther(maxAmt)} ETH for ${bText}`;
-      } else {
-        el.className = "condition-status";
-        el.textContent = "❌ No auto-fund condition set — all invoices need manual funding";
-      }
-    }
-  } catch (err) {
-    console.error("Load conditions error:", err);
-  }
+  // Logic disabled as UI components were removed by user request
+  return;
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -835,7 +807,7 @@ async function refreshInvoices() {
   try {
     const count = Number(await invoiceReadContract.counter());
     allInvoices = [];
-    
+
     // Fetch Metadata from Backend
     let metaMap = {};
     try {
@@ -846,23 +818,23 @@ async function refreshInvoices() {
       if (metaData.success) {
         metaData.metadata.forEach(m => { metaMap[m.invoiceId] = m; });
       }
-    } catch(e) { console.warn("Could not fetch invoice metadata:", e); }
+    } catch (e) { console.warn("Could not fetch invoice metadata:", e); }
 
     for (let i = 1; i <= count; i++) {
       const raw = await invoiceReadContract.invoices(i);
       allInvoices.push({
-        id:              Number(raw[0]),
-        supplier:        raw[1],
-        buyer:           raw[2],
-        amount:          raw[3],
-        dueDate:         Number(raw[4]),
-        buyerVerified:   raw[5],
-        escrowLocked:    raw[6],
+        id: Number(raw[0]),
+        supplier: raw[1],
+        buyer: raw[2],
+        amount: raw[3],
+        dueDate: Number(raw[4]),
+        buyerVerified: raw[5],
+        escrowLocked: raw[6],
         financierFunded: raw[7],
-        isPaid:          raw[8],
-        status:          raw[9],
-        financier:       raw[10],
-        biddingTimeout:  metaMap[i]?.biddingTimeout ? Math.floor(new Date(metaMap[i].biddingTimeout).getTime() / 1000) : null
+        isPaid: raw[8],
+        status: raw[9],
+        financier: raw[10],
+        biddingTimeout: metaMap[i]?.biddingTimeout ? Math.floor(new Date(metaMap[i].biddingTimeout).getTime() / 1000) : null
       });
     }
 
@@ -958,7 +930,7 @@ function renderInvoiceTable(invoices, perspective) {
         countdownHtml = `
           <div class="countdown-timer" data-due="${inv.biddingTimeout}" data-type="bidding">
             <div style="font-size:0.75rem;color:var(--accent);margin-bottom:2px;font-weight:600;">🔥 BIDDING ENDS</div>
-            <span style="font-weight:700;font-size:0.95rem;color:var(--accent);">${String(mm).padStart(2,"0")}:${String(ss).padStart(2,"0")}</span>
+            <span style="font-weight:700;font-size:0.95rem;color:var(--accent);">${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}</span>
             <div style="height:4px;background:rgba(255,255,255,0.1);border-radius:2px;margin-top:3px;">
               <div style="height:100%;width:${pct}%;background:var(--accent);border-radius:2px;transition:width 1s linear;"></div>
             </div>
@@ -975,7 +947,7 @@ function renderInvoiceTable(invoices, perspective) {
       const barColor = pct > 50 ? "#22c55e" : pct > 20 ? "#f59e0b" : "#ef4444";
       countdownHtml = `
         <div class="countdown-timer" data-due="${inv.dueDate}">
-          <span style="font-weight:700;font-size:0.95rem;color:${barColor};">${String(mm).padStart(2,"0")}:${String(ss).padStart(2,"0")}</span>
+          <span style="font-weight:700;font-size:0.95rem;color:${barColor};">${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}</span>
           <div style="height:4px;background:rgba(255,255,255,0.1);border-radius:2px;margin-top:3px;">
             <div style="height:100%;width:${pct}%;background:${barColor};border-radius:2px;transition:width 1s linear;"></div>
           </div>
@@ -1056,7 +1028,7 @@ function startCountdownTicker() {
       const isBidding = el.getAttribute("data-type") === "bidding";
 
       if (secsLeft <= 0) {
-        el.innerHTML = isBidding 
+        el.innerHTML = isBidding
           ? `<span style="color:var(--accent);font-weight:600;" class="countdown-pulse">⌛ FINALIZING...</span>`
           : `<span style="color:#ef4444;font-weight:600;" class="countdown-pulse">⏰ OVERDUE</span>`;
         needsRefresh = true;
@@ -1065,12 +1037,12 @@ function startCountdownTicker() {
 
       const mm = Math.floor(secsLeft / 60);
       const ss = secsLeft % 60;
-      
+
       if (isBidding) {
         const pct = Math.max(0, Math.min(100, (secsLeft / (10 * 60)) * 100));
         el.innerHTML = `
           <div style="font-size:0.75rem;color:var(--accent);margin-bottom:2px;font-weight:600;">🔥 BIDDING ENDS</div>
-          <span style="font-weight:700;font-size:0.95rem;color:var(--accent);">${String(mm).padStart(2,"0")}:${String(ss).padStart(2,"0")}</span>
+          <span style="font-weight:700;font-size:0.95rem;color:var(--accent);">${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}</span>
           <div style="height:4px;background:rgba(255,255,255,0.1);border-radius:2px;margin-top:3px;">
             <div style="height:100%;width:${pct}%;background:var(--accent);border-radius:2px;transition:width 1s linear;"></div>
           </div>`;
@@ -1078,7 +1050,7 @@ function startCountdownTicker() {
         const pct = Math.max(0, Math.min(100, (secsLeft / (30 * 60)) * 100));
         const barColor = pct > 50 ? "#22c55e" : pct > 20 ? "#f59e0b" : "#ef4444";
         el.innerHTML = `
-          <span style="font-weight:700;font-size:0.95rem;color:${barColor};">${String(mm).padStart(2,"0")}:${String(ss).padStart(2,"0")}</span>
+          <span style="font-weight:700;font-size:0.95rem;color:${barColor};">${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}</span>
           <div style="height:4px;background:rgba(255,255,255,0.1);border-radius:2px;margin-top:3px;">
             <div style="height:100%;width:${pct}%;background:${barColor};border-radius:2px;transition:width 1s linear;"></div>
           </div>`;
@@ -1103,10 +1075,10 @@ if (typeof window !== "undefined") {
 // ═════════════════════════════════════════════════════════════════════════════
 
 function updateStats() {
-  document.getElementById("statTotal").textContent    = allInvoices.length;
-  document.getElementById("statPending").textContent   = allInvoices.filter(i => i.status === "PENDING_BUYER" || i.status === "PENDING").length;
-  document.getElementById("statFinanced").textContent  = allInvoices.filter(i => i.status === "FINANCED" || i.status === "ESCROWED").length;
-  document.getElementById("statPaid").textContent      = allInvoices.filter(i => i.status === "PAID").length;
+  document.getElementById("statTotal").textContent = allInvoices.length;
+  document.getElementById("statPending").textContent = allInvoices.filter(i => i.status === "PENDING_BUYER" || i.status === "PENDING").length;
+  document.getElementById("statFinanced").textContent = allInvoices.filter(i => i.status === "FINANCED" || i.status === "ESCROWED").length;
+  document.getElementById("statPaid").textContent = allInvoices.filter(i => i.status === "PAID").length;
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1296,15 +1268,15 @@ function filterHistory(el) {
 
 function getEventBadge(type) {
   const map = {
-    InvoiceUploaded:     { icon: "📤", label: "Uploaded",  cls: "badge-uploaded" },
-    BuyerApproved:       { icon: "✅", label: "Approved",  cls: "badge-approved" },
-    AutoApproved:        { icon: "🤖", label: "Auto-Approved", cls: "badge-approved" },
-    EscrowDeposited:     { icon: "🔒", label: "Escrowed",  cls: "badge-escrowed" },
-    Financed:            { icon: "💰", label: "Financed",  cls: "badge-financed" },
-    Paid:                { icon: "✅", label: "Paid",      cls: "badge-paid" },
-    Deposited:           { icon: "⬆️", label: "Deposit",   cls: "badge-deposit" },
-    Withdrawn:           { icon: "⬇️", label: "Withdraw",  cls: "badge-withdraw" },
-    BuyerConditionSet:   { icon: "⚙️", label: "Condition", cls: "badge-condition" },
+    InvoiceUploaded: { icon: "📤", label: "Uploaded", cls: "badge-uploaded" },
+    BuyerApproved: { icon: "✅", label: "Approved", cls: "badge-approved" },
+    AutoApproved: { icon: "🤖", label: "Auto-Approved", cls: "badge-approved" },
+    EscrowDeposited: { icon: "🔒", label: "Escrowed", cls: "badge-escrowed" },
+    Financed: { icon: "💰", label: "Financed", cls: "badge-financed" },
+    Paid: { icon: "✅", label: "Paid", cls: "badge-paid" },
+    Deposited: { icon: "⬆️", label: "Deposit", cls: "badge-deposit" },
+    Withdrawn: { icon: "⬇️", label: "Withdraw", cls: "badge-withdraw" },
+    BuyerConditionSet: { icon: "⚙️", label: "Condition", cls: "badge-condition" },
     FinancierConditionSet: { icon: "⚙️", label: "Condition", cls: "badge-condition" },
   };
   return map[type] || { icon: "📝", label: type, cls: "badge-uploaded" };
@@ -1372,13 +1344,13 @@ function renderHistoryTimeline(events) {
     // Determine latest status
     if (ev.eventType === "Paid") inv.status = "Paid";
     else if (ev.eventType === "Financed" && inv.status !== "Paid") inv.status = "Financed";
-    else if (ev.eventType === "EscrowDeposited" && !["Financed","Paid"].includes(inv.status)) inv.status = "Escrowed";
-    else if ((ev.eventType === "BuyerApproved" || ev.eventType === "AutoApproved") && !["Escrowed","Financed","Paid"].includes(inv.status)) inv.status = "Approved";
+    else if (ev.eventType === "EscrowDeposited" && !["Financed", "Paid"].includes(inv.status)) inv.status = "Escrowed";
+    else if ((ev.eventType === "BuyerApproved" || ev.eventType === "AutoApproved") && !["Escrowed", "Financed", "Paid"].includes(inv.status)) inv.status = "Approved";
   });
 
   // ── Render invoice summary cards ──────────────────────────────────────
   let summaryHtml = "";
-  const invoiceIds = Object.keys(invoiceMap).sort((a,b) => Number(a) - Number(b));
+  const invoiceIds = Object.keys(invoiceMap).sort((a, b) => Number(a) - Number(b));
   if (invoiceIds.length > 0) {
     const statusColors = { Pending: "#facc15", Approved: "#4ade80", Escrowed: "#60a5fa", Financed: "#c084fc", Paid: "#34d399" };
     const statusSteps = ["Pending", "Approved", "Escrowed", "Financed", "Paid"];
@@ -1387,12 +1359,12 @@ function renderHistoryTimeline(events) {
       <h3 style="color:var(--text-secondary);font-size:0.85rem;margin:0 0 0.8rem 0;font-weight:600;">📊 Invoice Lifecycle Status</h3>
       <div style="display:flex;flex-wrap:wrap;gap:0.75rem;margin-bottom:1.5rem;">
       ${invoiceIds.map(id => {
-        const inv = invoiceMap[id];
-        const stepIdx = statusSteps.indexOf(inv.status);
-        const statusColor = statusColors[inv.status] || "#818cf8";
-        const progressPct = ((stepIdx + 1) / statusSteps.length) * 100;
+      const inv = invoiceMap[id];
+      const stepIdx = statusSteps.indexOf(inv.status);
+      const statusColor = statusColors[inv.status] || "#818cf8";
+      const progressPct = ((stepIdx + 1) / statusSteps.length) * 100;
 
-        return `<div style="flex:1;min-width:260px;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:0.9rem 1rem;">
+      return `<div style="flex:1;min-width:260px;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:0.9rem 1rem;">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;">
             <span style="font-weight:700;color:var(--text-primary);font-size:0.95rem;">Invoice #${id}</span>
             <span style="font-size:0.7rem;font-weight:600;padding:0.15rem 0.5rem;border-radius:4px;background:${statusColor}22;color:${statusColor};">${inv.status.toUpperCase()}</span>
@@ -1405,14 +1377,14 @@ function renderHistoryTimeline(events) {
           </div>
           <div style="margin-top:0.6rem;">
             <div style="display:flex;justify-content:space-between;font-size:0.62rem;color:var(--text-muted);margin-bottom:0.2rem;">
-              ${statusSteps.map(s => `<span style="${s === inv.status ? 'color:'+statusColor+';font-weight:600' : ''}">${s}</span>`).join("")}
+              ${statusSteps.map(s => `<span style="${s === inv.status ? 'color:' + statusColor + ';font-weight:600' : ''}">${s}</span>`).join("")}
             </div>
             <div style="height:4px;background:rgba(255,255,255,0.05);border-radius:2px;overflow:hidden;">
               <div style="height:100%;width:${progressPct}%;background:${statusColor};border-radius:2px;transition:width 0.3s;"></div>
             </div>
           </div>
         </div>`;
-      }).join("")}
+    }).join("")}
       </div>
     </div>`;
   }
@@ -1469,19 +1441,19 @@ async function startBidding(id) {
 
   try {
     showToast("⏳ Transitioning to bidding mode...", "info");
-    
+
     // 1. Notify Backend of the timeout
     const resp = await fetch(`${API_URL}/invoices/${id}/start-bidding`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-wallet-address": connectedAddr },
-        body: JSON.stringify({ timeoutMinutes: parseInt(mins) })
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-wallet-address": connectedAddr },
+      body: JSON.stringify({ timeoutMinutes: parseInt(mins) })
     });
     const data = await resp.json();
     if (!data.success) throw new Error(data.message);
 
     // 2. Execute on-chain startBidding
     await sendAACall(INVOICE_ABI, CONFIG.contracts.InvoiceContract, "startBidding", [id]);
-    
+
     showToast(`✅ Bidding started! Auto-electing winner in ${mins} minutes.`, "success");
     await refreshInvoices();
   } catch (err) {
@@ -1497,9 +1469,9 @@ async function submitBid(invoiceId) {
   try {
     const resp = await fetch(`${API_URL}/invoices/${invoiceId}/bids`, {
       method: "POST",
-      headers: { 
+      headers: {
         "Content-Type": "application/json",
-        "x-wallet-address": connectedAddr 
+        "x-wallet-address": connectedAddr
       },
       body: JSON.stringify({ advanceRate: parseInt(adv), interestRate: parseInt(intr) })
     });
@@ -1516,10 +1488,10 @@ async function submitBid(invoiceId) {
 async function acceptBid(invoiceId, bidId, winningFinancier) {
   try {
     showToast("⏳ Fetching bid details...", "info");
-    
+
     // Fetch rates from MongoDB
     const bidResult = await fetch(`${API_URL}/invoices/${invoiceId}/bids`, {
-        headers: { "x-wallet-address": connectedAddr }
+      headers: { "x-wallet-address": connectedAddr }
     });
     const bidData = await bidResult.json();
     const winner = bidData.bids.find(b => b._id === bidId);
@@ -1527,21 +1499,21 @@ async function acceptBid(invoiceId, bidId, winningFinancier) {
     if (!winner) return showToast("Could not find bid rates", "error");
 
     showToast(`⏳ Accepting bid (${winner.advanceRate}% / ${winner.interestRate}%)...`, "busy");
-    
+
     // 1. Mark as accepted in backend
     await fetch(`${API_URL}/invoices/${invoiceId}/bids/${bidId}/accept`, {
       method: "PATCH",
       headers: { "x-wallet-address": connectedAddr }
     });
-    
+
     // 2. Execute on-chain transaction via AA
     await sendAACall(INVOICE_ABI, CONFIG.contracts.InvoiceContract, "acceptBid", [
-        invoiceId, 
-        winningFinancier,
-        winner.advanceRate,
-        winner.interestRate
+      invoiceId,
+      winningFinancier,
+      winner.advanceRate,
+      winner.interestRate
     ]);
-    
+
     showToast("✅ Bid accepted and invoice funded!", "success");
     await refreshInvoices();
   } catch (err) {
@@ -1550,58 +1522,58 @@ async function acceptBid(invoiceId, bidId, winningFinancier) {
 }
 
 async function viewBids(invoiceId) {
-    try {
-        const inv = allInvoices.find(i => i.id === invoiceId);
-        const panel = document.getElementById("supplierBiddingPanel");
-        const list = document.getElementById("supplierBidsList");
-        
-        // Always show the panel and clear old content immediately
-        panel.classList.remove("hidden");
-        list.innerHTML = `<p style="color:var(--text-secondary);text-align:center;padding:1rem;">⏳ Loading bids...</p>`;
+  try {
+    const inv = allInvoices.find(i => i.id === invoiceId);
+    const panel = document.getElementById("supplierBiddingPanel");
+    const list = document.getElementById("supplierBidsList");
 
-        // Build header with timer
-        let headerHtml = `<span class="card-title">💎 Active Bids — Invoice #${invoiceId}</span>`;
-        if (inv && inv.biddingTimeout) {
-            const now = Math.floor(Date.now() / 1000);
-            const secsLeft = inv.biddingTimeout - now;
-            if (secsLeft > 0) {
-                headerHtml += `<div class="countdown-timer" data-due="${inv.biddingTimeout}" data-type="bidding" style="margin-left: auto; text-align: right;">
+    // Always show the panel and clear old content immediately
+    panel.classList.remove("hidden");
+    list.innerHTML = `<p style="color:var(--text-secondary);text-align:center;padding:1rem;">⏳ Loading bids...</p>`;
+
+    // Build header with timer
+    let headerHtml = `<span class="card-title">💎 Active Bids — Invoice #${invoiceId}</span>`;
+    if (inv && inv.biddingTimeout) {
+      const now = Math.floor(Date.now() / 1000);
+      const secsLeft = inv.biddingTimeout - now;
+      if (secsLeft > 0) {
+        headerHtml += `<div class="countdown-timer" data-due="${inv.biddingTimeout}" data-type="bidding" style="margin-left: auto; text-align: right;">
                     <div style="font-size:0.75rem;color:var(--accent);font-weight:600;margin-bottom:2px;">🔥 BIDDING ENDS</div>
                     <span style="font-weight:700;font-size:0.95rem;color:var(--accent);">Loading...</span>
                 </div>`;
-            } else {
-                headerHtml += `<span style="color:var(--accent);font-weight:600;margin-left:auto;" class="countdown-pulse">⌛ FINALIZING...</span>`;
-            }
-        }
-        
-        const headerEl = panel.querySelector(".card-header");
-        if (headerEl) {
-            headerEl.innerHTML = headerHtml;
-            headerEl.style.display = "flex";
-            headerEl.style.justifyContent = "space-between";
-            headerEl.style.alignItems = "center";
-        }
+      } else {
+        headerHtml += `<span style="color:var(--accent);font-weight:600;margin-left:auto;" class="countdown-pulse">⌛ FINALIZING...</span>`;
+      }
+    }
 
-        // Fetch bids from MongoDB for THIS specific invoice
-        const resp = await fetch(`${API_URL}/invoices/${invoiceId}/bids`, {
-            headers: { "x-wallet-address": connectedAddr }
-        });
-        const data = await resp.json();
+    const headerEl = panel.querySelector(".card-header");
+    if (headerEl) {
+      headerEl.innerHTML = headerHtml;
+      headerEl.style.display = "flex";
+      headerEl.style.justifyContent = "space-between";
+      headerEl.style.alignItems = "center";
+    }
 
-        if (data.success && data.bids.length > 0) {
-            list.innerHTML = data.bids.map(b => `
+    // Fetch bids from MongoDB for THIS specific invoice
+    const resp = await fetch(`${API_URL}/invoices/${invoiceId}/bids`, {
+      headers: { "x-wallet-address": connectedAddr }
+    });
+    const data = await resp.json();
+
+    if (data.success && data.bids.length > 0) {
+      list.innerHTML = data.bids.map(b => `
                 <div class="card" style="margin-bottom:0.5rem; border-left: 4px solid var(--accent);">
                     <p><strong>Financier:</strong> ${truncAddr(b.financerAddress)}</p>
                     <p><strong>Advance:</strong> ${b.advanceRate}% | <strong>Interest:</strong> ${b.interestRate}%</p>
                     <button class="btn btn-success btn-sm" onclick="acceptBid(${invoiceId}, '${b._id}', '${b.financerAddress}')">Accept Bid</button>
                 </div>
             `).join("");
-        } else {
-            list.innerHTML = `<p style="color:var(--text-secondary);text-align:center;padding:2rem;">📭 No bids yet for Invoice #${invoiceId}. Waiting for financiers to bid...</p>`;
-        }
-    } catch (e) {
-        showToast("Failed to fetch bids: " + e.message, "error");
+    } else {
+      list.innerHTML = `<p style="color:var(--text-secondary);text-align:center;padding:2rem;">📭 No bids yet for Invoice #${invoiceId}. Waiting for financiers to bid...</p>`;
     }
+  } catch (e) {
+    showToast("Failed to fetch bids: " + e.message, "error");
+  }
 
 }
 
@@ -1619,9 +1591,9 @@ async function initiateVote() {
   try {
     const resp = await fetch(`${API_URL}/voting/initiate`, {
       method: "POST",
-      headers: { 
+      headers: {
         "Content-Type": "application/json",
-        "x-wallet-address": connectedAddr 
+        "x-wallet-address": connectedAddr
       },
       body: JSON.stringify({ targetUserId: targetId, reason, timeoutMinutes })
     });
@@ -1641,9 +1613,9 @@ async function castVote(sessionId, decision) {
   try {
     const resp = await fetch(`${API_URL}/voting/${sessionId}/vote`, {
       method: "POST",
-      headers: { 
+      headers: {
         "Content-Type": "application/json",
-        "x-wallet-address": connectedAddr 
+        "x-wallet-address": connectedAddr
       },
       body: JSON.stringify({ decision })
     });
@@ -1668,7 +1640,7 @@ async function refreshVotes() {
     if (data.success) {
       renderActiveVotes(data.votes);
     }
-  } catch (e) {}
+  } catch (e) { }
 }
 
 function renderGovernanceInfo(nodes) {
@@ -1720,7 +1692,7 @@ function switchTab(btn) {
   document.querySelectorAll("[id^='tab-']").forEach(div => div.classList.add("hidden"));
   const tab = document.getElementById("tab-" + target);
   if (tab) tab.classList.remove("hidden");
-  
+
   if (target === "governanceTab") refreshVotes();
 }
 
