@@ -15,11 +15,14 @@ const http = require("http");
 const { ethers } = require("ethers");
 const fs   = require("fs");
 const path = require("path");
+const mongoose = require("mongoose");
+const User = require("./models/User");
 
 const PORT    = 3001;
+const MONGO_URI = "mongodb://localhost:27017/invoice-finance";
 const RPC_URL = "http://127.0.0.1:8545";
 
-// ─── Hardhat default private keys (for signing UserOps on behalf of users) ───
+// ─── Hardhat default private keys (dynamically mapped) ─────────────
 const PRIVATE_KEYS = {
   "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266": "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80", // #0
   "0x70997970c51812dc3a010c7d01b50e0d17dc79c8": "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d", // #1
@@ -42,6 +45,19 @@ const PRIVATE_KEYS = {
   "0xdd2fd4581271e230360230f9337d5c0430bf44c0": "0xde9be858da4a475276426320d5e9262ecfc3ba460bfac56360bfa6c4c28b4ee0", // #18
   "0x8626f6940e2eb28930efb4cef49b2d1f2c9c1199": "0xdf57089febbacf7ba0bc227dafbffa9fc08a93fdc68e1e42411a14efcf23656e", // #19
 };
+for (let i = 0; i < 20; i++) {
+  const wallet = ethers.HDNodeWallet.fromPhrase("test test test test test test test test test test test junk", null, "m/44'/60'/0'/0/" + i);
+  PRIVATE_KEYS[wallet.address.toLowerCase()] = wallet.privateKey;
+}
+
+// ─── Load previously saved dynamic keys ──────────────────────────────────────
+const dynamicKeysPath = path.join(__dirname, "dynamic_keys.json");
+if (fs.existsSync(dynamicKeysPath)) {
+  const savedKeys = JSON.parse(fs.readFileSync(dynamicKeysPath, "utf8"));
+  for (const [addr, pk] of Object.entries(savedKeys)) {
+    PRIVATE_KEYS[addr.toLowerCase()] = pk;
+  }
+}
 
 // ─── ABIs ────────────────────────────────────────────────────────────────────
 const SMART_WALLET_ABI = [
@@ -49,7 +65,7 @@ const SMART_WALLET_ABI = [
 ];
 
 const BUNDLER_ABI = [
-  "function bundleOne(tuple(address sender, address target, bytes data, bytes signature, address paymaster, uint256 nonce) op) external",
+  "function bundleOne(tuple(address sender, address target, bytes data, bytes signature, address paymaster, bytes paymasterData, uint256 nonce) op) external",
 ];
 
 const ENTRYPOINT_ABI = [
@@ -58,8 +74,38 @@ const ENTRYPOINT_ABI = [
 
 // ─── State ───────────────────────────────────────────────────────────────────
 let provider, relayerWallet, bundlerContract, entryPointContract, config;
+let pendingRequests = []; // For manual admin approval flow
+
+// ─── Mutex for serializing ALL blockchain transactions ───────────────────────
+// Hardhat automining mode mines each tx instantly. If two txs are sent
+// concurrently from the same wallet, the second gets a stale nonce.
+// This mutex ensures only one tx flies at a time.
+class Mutex {
+  constructor() { this._queue = []; this._locked = false; }
+  async acquire() {
+    return new Promise(resolve => {
+      if (!this._locked) { this._locked = true; resolve(); }
+      else { this._queue.push(resolve); }
+    });
+  }
+  release() {
+    if (this._queue.length > 0) { this._queue.shift()(); }
+    else { this._locked = false; }
+  }
+}
+const txMutex = new Mutex();
+
+async function withMutex(fn) {
+  await txMutex.acquire();
+  try { return await fn(); }
+  finally { txMutex.release(); }
+}
 
 async function init() {
+  console.log(`📡 Connecting to MongoDB...`);
+  await mongoose.connect(MONGO_URI);
+  console.log("✅ MongoDB Connected.");
+
   // Load deployed config
   const configPath = path.join(__dirname, "..", "frontend", "deployed.json");
   if (!fs.existsSync(configPath)) {
@@ -71,7 +117,8 @@ async function init() {
   // Connect to local node with Account #0 (deployer) as the relayer
   provider = new ethers.JsonRpcProvider(RPC_URL);
   const relayerKey = PRIVATE_KEYS["0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"];
-  relayerWallet = new ethers.Wallet(relayerKey, provider);
+  const baseWallet = new ethers.Wallet(relayerKey, provider);
+  relayerWallet = new ethers.NonceManager(baseWallet);
 
   bundlerContract = new ethers.Contract(config.contracts.Bundler, BUNDLER_ABI, relayerWallet);
   entryPointContract = new ethers.Contract(config.contracts.EntryPoint, ENTRYPOINT_ABI, provider);
@@ -79,8 +126,8 @@ async function init() {
   console.log("═══════════════════════════════════════════════════════");
   console.log("  ERC-4337 Bundler Relay Server");
   console.log("═══════════════════════════════════════════════════════");
-  console.log(`  Relayer:   ${relayerWallet.address}`);
-  console.log(`  Bundler:   ${config.contracts.Bundler}`);
+  console.log(`  Relayer:    ${relayerWallet.address}`);
+  console.log(`  Bundler:    ${config.contracts.Bundler}`);
   console.log(`  EntryPoint: ${config.contracts.EntryPoint}`);
   console.log(`  Paymaster:  ${config.contracts.Paymaster}`);
   console.log(`  Listening:  http://localhost:${PORT}`);
@@ -207,25 +254,40 @@ async function handleSubmit(op) {
   }
   // ────────────────────────────────────────────────────────────────────────────
 
-  // Step 2: Build the full UserOp with signature
   const fullOp = {
-    sender:    op.sender,
-    target:    op.target,
-    data:      op.data,
-    signature: signature,
-    paymaster: op.paymaster,
-    nonce:     nonce,
+    sender:        op.sender,
+    target:        op.target,
+    data:          op.data,
+    signature:     signature,
+    paymaster:     op.paymaster,
+    paymasterData: op.paymasterData || "0x",
+    nonce:         nonce,
   };
 
-  // Step 3: Submit via Bundler.bundleOne()
-  console.log(`   📤 Submitting to Bundler.bundleOne()...`);
-  const tx = await bundlerContract.bundleOne(fullOp);
-  const receipt = await tx.wait();
+  try {
+    const tx = await bundlerContract.bundleOne(fullOp);
+    const receipt = await tx.wait();
 
-  console.log(`   ✅ Executed! TX: ${tx.hash}`);
-  console.log(`   ⛽ Gas used: ${receipt.gasUsed.toString()}\n`);
+    console.log(`   ✅ Executed! TX: ${tx.hash}`);
+    console.log(`   ⛽ Gas used: ${receipt.gasUsed.toString()}\n`);
 
-  return { txHash: tx.hash, gasUsed: receipt.gasUsed.toString() };
+    return { txHash: tx.hash, gasUsed: receipt.gasUsed.toString() };
+  } catch (err) {
+    let revertReason = err.message;
+
+    // Try to decode revert reason from error data
+    if (err.data) {
+       revertReason = `Reverted: ${err.data}`;
+       // Common patterns: 0x08c379a0 (Error(string)), 0x4e487b71 (Panic(uint256))
+       if (err.data.startsWith("0x08c379a0")) {
+          const decoded = ethers.AbiCoder.defaultAbiCoder().decode(["string"], "0x" + err.data.slice(10));
+          revertReason = `Reverted: ${decoded[0]}`;
+       }
+    }
+
+    console.error(`   ❌ Revert: ${revertReason}`);
+    throw new Error(revertReason);
+  }
 }
 
 // ─── HTTP Server ─────────────────────────────────────────────────────────────
@@ -256,12 +318,192 @@ function startServer() {
             return;
           }
 
-          const result = await handleSubmit(op);
+          const result = await withMutex(() => handleSubmit(op));
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ success: true, ...result }));
         } catch (err) {
           console.error(`   ❌ Error: ${err.message}\n`);
           res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ success: false, error: err.message }));
+        }
+      });
+    } else if (req.method === "POST" && req.url === "/api/sign-paymaster-ticket") {
+      let body = "";
+      req.on("data", (chunk) => (body += chunk));
+      req.on("end", async () => {
+        try {
+          const op = JSON.parse(body);
+          if (!op.sender || !op.target || !op.data) throw new Error("Missing operation fields");
+
+          // 🔥 LEVEL 1 OPTIMIZATION: Check MongoDB instead of JSON file!
+          const senderLower = op.sender.toLowerCase();
+          const userDoc = await User.findOne({ 
+            $or: [
+              { address: senderLower },
+              { smartWallet: senderLower }
+            ],
+            isWhitelisted: true 
+          });
+          
+          if (!userDoc) {
+             throw new Error("Paymaster Oracle: User is NOT whitelisted in MongoDB.");
+          }
+
+          // Step 1: Reconstruct the exact hash that the Paymaster will verify
+          const nonce = await entryPointContract.nonces(op.sender);
+          const hashToSign = ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(
+            ["address", "address", "bytes32", "uint256"],
+            [op.sender, op.target, ethers.keccak256(op.data), nonce]
+          ));
+
+          // Step 2: Sign it with the Backend Oracle Key
+          const oracleWallet = new ethers.Wallet(config.backendOracle.privateKey);
+          const oracleSignature = await oracleWallet.signMessage(ethers.getBytes(hashToSign));
+
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ success: true, signature: oracleSignature }));
+        } catch (err) {
+          console.error("   ❌ Oracle Error:", err.message);
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ success: false, error: err.message }));
+        }
+      });
+    } else if (req.method === "POST" && req.url === "/api/request-join") {
+      let body = "";
+      req.on("data", (chunk) => (body += chunk));
+      req.on("end", () => {
+        try {
+          const { wallet, role, pk } = JSON.parse(body);
+          if (!wallet || !role || !pk) throw new Error("Missing wallet, role, or private key (pk)");
+          
+          if (!pendingRequests.find(r => r.wallet.toLowerCase() === wallet.toLowerCase())) {
+            pendingRequests.push({ wallet, role, timestamp: Date.now() });
+            
+            // Save PK securely so we can do zero-popup auto-signing for them
+            const wl = wallet.toLowerCase();
+            PRIVATE_KEYS[wl] = pk;
+            
+            // Persist to dynamic_keys.json
+            let savedKeys = {};
+            if (fs.existsSync(dynamicKeysPath)) savedKeys = JSON.parse(fs.readFileSync(dynamicKeysPath, "utf8"));
+            savedKeys[wl] = pk;
+            fs.writeFileSync(dynamicKeysPath, JSON.stringify(savedKeys, null, 2));
+
+            console.log(`   📝 New registration request from ${wallet} for role ${role}. (Private key stored)`);
+          }
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ success: true }));
+        } catch (err) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ success: false, error: err.message }));
+        }
+      });
+    } else if (req.method === "GET" && req.url === "/api/pending-requests") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ success: true, pendingRequests }));
+    } else if (req.method === "POST" && req.url === "/api/approve-join") {
+      let body = "";
+      req.on("data", (chunk) => (body += chunk));
+      req.on("end", async () => {
+        try {
+          const { wallet } = JSON.parse(body);
+          const reqItem = pendingRequests.find(r => r.wallet.toLowerCase() === wallet.toLowerCase());
+          if (!reqItem) throw new Error("Request not found");
+
+          // Enqueue ALL blockchain transactions through the serial queue
+          const result = await withMutex(async () => {
+            console.log(`   🚀 Approving ${wallet} (Role: ${reqItem.role})...`);
+            
+            // 1. Deploy SmartWallet
+            const swArtifact = JSON.parse(fs.readFileSync(path.join(__dirname, "../artifacts/contracts/SmartWallet.sol/SmartWallet.json"), "utf8"));
+            const swFactory = new ethers.ContractFactory(swArtifact.abi, swArtifact.bytecode, relayerWallet);
+            console.log(`      Deploying SmartWallet...`);
+            const sw = await swFactory.deploy(wallet, config.contracts.EntryPoint, config.contracts.Paymaster);
+            await sw.waitForDeployment();
+            console.log(`      ✅ SmartWallet deployed at: ${sw.target}`);
+
+            // 2. Off-chain database validation logic goes here
+            // 🔥 LEVEL 1 OPTIMIZATION: Save to MongoDB!
+            await User.findOneAndUpdate(
+              { address: wallet.toLowerCase() },
+              { address: wallet.toLowerCase(), role: reqItem.role, smartWallet: sw.target, isWhitelisted: true },
+              { upsert: true }
+            );
+            console.log(`      ✅ Added to MongoDB whitelist!`);
+
+            // 3. Update deployed.json (we still keep this for frontend config, but logic uses Mongo)
+            const configPath = path.join(__dirname, "..", "frontend", "deployed.json");
+            const curConfig = JSON.parse(fs.readFileSync(configPath, "utf8"));
+            curConfig.dynamicUsers = curConfig.dynamicUsers || {};
+            curConfig.dynamicUsers[wallet.toLowerCase()] = { role: reqItem.role, smartWallet: sw.target };
+            fs.writeFileSync(configPath, JSON.stringify(curConfig, null, 2));
+
+            return sw.target;
+          });
+
+          // 4. Remove from pending queue
+          pendingRequests = pendingRequests.filter(r => r.wallet.toLowerCase() !== wallet.toLowerCase());
+
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ success: true, smartWallet: result }));
+        } catch (err) {
+          console.error("   ❌ Error approving join:", err.message);
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ success: false, error: err.message }));
+        }
+      });
+    } else if (req.method === "GET" && req.url === "/api/admin/users") {
+      // 🔥 LEVEL 1 OPTIMIZATION: Return all users from MongoDB
+      try {
+        const users = await User.find({ isWhitelisted: true });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ success: true, users }));
+      } catch (err) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ success: false, error: err.message }));
+      }
+    } else if (req.method === "POST" && req.url === "/api/admin/remove-user") {
+      // 🔥 LEVEL 1 OPTIMIZATION: Remove from MongoDB off-chain
+      let body = "";
+      req.on("data", (chunk) => (body += chunk));
+      req.on("end", async () => {
+        try {
+          const { wallet } = JSON.parse(body);
+          if (!wallet) throw new Error("Missing wallet address");
+          
+          await User.findOneAndUpdate(
+            { address: wallet.toLowerCase() },
+            { isWhitelisted: false }
+          );
+          
+          console.log(`   ⛔ Admin removed user ${wallet} from MongoDB.`);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ success: true }));
+        } catch (err) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ success: false, error: err.message }));
+        }
+      });
+    } else if (req.method === "POST" && req.url === "/api/admin/add-user") {
+      // 🔥 LEVEL 1 OPTIMIZATION: Add to MongoDB off-chain
+      let body = "";
+      req.on("data", (chunk) => (body += chunk));
+      req.on("end", async () => {
+        try {
+          const { wallet, role } = JSON.parse(body);
+          if (!wallet || !role) throw new Error("Missing wallet or role");
+          
+          await User.findOneAndUpdate(
+            { address: wallet.toLowerCase() },
+            { address: wallet.toLowerCase(), role, isWhitelisted: true },
+            { upsert: true }
+          );
+          
+          console.log(`   ✅ Admin whitelisted user ${wallet} (${role}) in MongoDB.`);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ success: true }));
+        } catch (err) {
+          res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ success: false, error: err.message }));
         }
       });

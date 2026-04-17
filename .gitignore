@@ -1,10 +1,6 @@
 node_modules
 .env
 
-# Databases and logs
-data/
-*.log
-
 # Hardhat files
 /cache
 /artifacts
@@ -19,3 +15,7 @@ data/
 
 # Hardhat Ignition default folder for deployments against a local node
 ignition/deployments/chain-31337
+
+# Local data and logs
+data/
+*.log

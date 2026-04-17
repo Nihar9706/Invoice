@@ -35,7 +35,7 @@ node scripts/bundler-relay.js
 
 ### **Terminal 4: Frontend Server**
 ```bash
-npx http-server frontend -p 3000 -c-1
+npx http-server fronte nd -p 3000 -c-1
 ```
 
 ---
