@@ -105,11 +105,16 @@ class BiddingService {
 
         const contract = new ethers.Contract(
             CONFIG.contracts.InvoiceContract,
-            ["function acceptBid(uint256 id, address winningFinancier) external"],
+            ["function acceptBid(uint256 id, address winningFinancier, uint256 _advanceRate, uint256 _interestRate) external"],
             signer
         );
 
-        const tx = await contract.acceptBid(invoice.invoiceId, winner.financerAddress);
+        const tx = await contract.acceptBid(
+            invoice.invoiceId, 
+            winner.financerAddress,
+            winner.advanceRate,
+            winner.interestRate
+        );
         await tx.wait();
         
         console.log(`   ✅ On-chain acceptBid TX confirmed for Invoice #${invoice.invoiceId}`);

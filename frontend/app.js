@@ -31,7 +31,7 @@ const INVOICE_ABI = [
   "function setBuyerCondition(uint256 maxAmount, address allowedSupplier) external",
   "function setFinancierCondition(uint256 maxAmount, address allowedBuyer) external",
   "function startBidding(uint256 id) external",
-  "function acceptBid(uint256 id, address winningFinancier) external",
+  "function acceptBid(uint256 id, address winningFinancier, uint256 _advanceRate, uint256 _interestRate) external",
   "function depositFunds() external payable",
   "function depositFor(address beneficiary) external payable",
   "function withdrawFunds(uint256 amount) external",
@@ -1515,7 +1515,18 @@ async function submitBid(invoiceId) {
 
 async function acceptBid(invoiceId, bidId, winningFinancier) {
   try {
-    showToast("⏳ Accepting bid on-chain...", "info");
+    showToast("⏳ Fetching bid details...", "info");
+    
+    // Fetch rates from MongoDB
+    const bidResult = await fetch(`${API_URL}/invoices/${invoiceId}/bids`, {
+        headers: { "x-wallet-address": connectedAddr }
+    });
+    const bidData = await bidResult.json();
+    const winner = bidData.bids.find(b => b._id === bidId);
+
+    if (!winner) return showToast("Could not find bid rates", "error");
+
+    showToast(`⏳ Accepting bid (${winner.advanceRate}% / ${winner.interestRate}%)...`, "busy");
     
     // 1. Mark as accepted in backend
     await fetch(`${API_URL}/invoices/${invoiceId}/bids/${bidId}/accept`, {
@@ -1524,7 +1535,12 @@ async function acceptBid(invoiceId, bidId, winningFinancier) {
     });
     
     // 2. Execute on-chain transaction via AA
-    await sendAACall(INVOICE_ABI, CONFIG.contracts.InvoiceContract, "acceptBid", [invoiceId, winningFinancier]);
+    await sendAACall(INVOICE_ABI, CONFIG.contracts.InvoiceContract, "acceptBid", [
+        invoiceId, 
+        winningFinancier,
+        winner.advanceRate,
+        winner.interestRate
+    ]);
     
     showToast("✅ Bid accepted and invoice funded!", "success");
     await refreshInvoices();

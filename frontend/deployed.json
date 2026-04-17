@@ -3,7 +3,7 @@
   "rpcUrl": "http://127.0.0.1:8545",
   "bundlerRelayUrl": "http://127.0.0.1:3001",
   "chainId": 31337,
-  "deployedAt": "2026-04-17T05:32:55.029Z",
+  "deployedAt": "2026-04-17T06:37:47.257Z",
   "contracts": {
     "EntryPoint": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
     "Paymaster": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
@@ -12,15 +12,15 @@
     "Bundler": "0x5FC8d32690cc91D4c39d9d3abcBD16989F875707",
     "SupplierWallets": [
       "0x0165878A594ca255338adfa4d48449f69242Eb8F",
-      "0x8A791620dd6260079BF849Dc5567aDC3F2FdC318"
+      "0xa513E6E4b8f2a923D98304ec87F64353C4D5C853"
     ],
     "BuyerWallets": [
-      "0xA51c1fc2f0D1a1b8494Ed1FE312d7C3a78Ed91C0",
-      "0x0B306BF915C4d645ff596e518fAf3F9669b97016"
+      "0x2279B7A0a67DB372996a5FaB50D91eAA73d2eBe6",
+      "0x8A791620dd6260079BF849Dc5567aDC3F2FdC318"
     ],
     "FinancierWallets": [
-      "0x68B1D87F95878fE05B998F19b66F4baba5De1aed",
-      "0x59b670e9fA9D0A427751Af201D676719a970857b"
+      "0x610178dA211FEF7D417bC0e6FeD39F05609AD788",
+      "0xB7f8BC63BbcaD18155201308C8f3540b07f84F5e"
     ]
   },
   "roles": {

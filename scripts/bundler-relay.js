@@ -134,15 +134,25 @@ async function init() {
   console.log("═══════════════════════════════════════════════════════\n");
 }
 
-// ─── Sign a UserOp ──────────────────────────────────────────────────────────
 async function signUserOp(op, nonce) {
+  // Check if contract exists
+  const code = await provider.getCode(op.sender);
+  if (code === "0x") {
+    throw new Error(`SmartWallet ${op.sender} not found on current chain. Did you reset the node? Please refresh the browser.`);
+  }
+
   // Get SmartWallet owner
   const smartWallet = new ethers.Contract(op.sender, SMART_WALLET_ABI, provider);
-  const ownerAddr = (await smartWallet.owner()).toLowerCase();
+  let ownerAddr;
+  try {
+     ownerAddr = (await smartWallet.owner()).toLowerCase();
+  } catch (e) {
+     throw new Error(`Failed to read owner of SmartWallet ${op.sender}. Address might not be a valid SmartWallet on this chain.`);
+  }
 
   const privateKey = PRIVATE_KEYS[ownerAddr];
   if (!privateKey) {
-    throw new Error(`No private key found for SmartWallet owner ${ownerAddr}`);
+    throw new Error(`No private key found for SmartWallet owner ${ownerAddr}. Are you using a custom wallet?`);
   }
 
   const signerWallet = new ethers.Wallet(privateKey);
@@ -160,6 +170,22 @@ async function signUserOp(op, nonce) {
   return signature;
 }
 
+/**
+ * Sign UserOp for Paymaster validation (Backend Oracle Signature)
+ */
+async function signPaymasterOp(op, nonce) {
+  const abiCoder = ethers.AbiCoder.defaultAbiCoder();
+  const encoded = abiCoder.encode(
+    ["address", "address", "bytes32", "uint256"],
+    [op.sender, op.target, ethers.keccak256(op.data), nonce]
+  );
+  const hash = ethers.keccak256(encoded);
+  
+  // Use the RELAYER's wallet to sign (this is the verifyingSigner in the contract)
+  const signature = await relayerWallet.signMessage(ethers.getBytes(hash));
+  return signature;
+}
+
 // ─── Handle UserOp submission ────────────────────────────────────────────────
 async function handleSubmit(op) {
   console.log(`📥 Received UserOp:`);
@@ -171,88 +197,87 @@ async function handleSubmit(op) {
   // Step 1: Get nonce from EntryPoint and sign the UserOp
   const nonce = await entryPointContract.nonces(op.sender);
   console.log(`   nonce:     ${nonce}`);
+  
   const signature = await signUserOp(op, nonce);
   console.log(`   ✅ Signed by SmartWallet owner (with nonce ${nonce})`);
 
   // ─── AUTO-DEPOSIT INTERCEPTOR ───────────────────────────────────────────────
-  // In our UserOp schema: op.target = contract address, op.data = raw calldata
-  // (NOT wrapped in SmartWallet.execute — the bundler does that on-chain)
-  //
-  // We intercept TWO functions:
-  //   1. approveByBuyer(id) → pull invoice amount from Buyer's MetaMask (for escrow)
-  //   2. fundInvoice(id)    → pull 90% of amount from Financier's MetaMask (for funding)
-  // ────────────────────────────────────────────────────────────────────────────
   try {
     const iface = new ethers.Interface([
       "function approveByBuyer(uint256 id)",
       "function fundInvoice(uint256 id)",
       "function acceptBid(uint256 id, address winningFinancier)",
     ]);
-    const decoded = iface.parseTransaction({ data: op.data });
+    
+    // We wrap the interceptor in an awaitable block so we can early-return safely
+    await (async () => {
+      let decoded;
+      try {
+        decoded = iface.parseTransaction({ data: op.data });
+      } catch (e) { return; } // Not an interceptable call
 
-    if (decoded && (decoded.name === "approveByBuyer" || decoded.name === "fundInvoice" || decoded.name === "acceptBid")) {
-      const id = decoded.args[0];
-      const fnName = decoded.name;
-      console.log(`   💡 Auto-Deposit intercepted ${fnName}(#${id})`);
+      if (decoded && (decoded.name === "approveByBuyer" || decoded.name === "fundInvoice" || decoded.name === "acceptBid")) {
+        const id = decoded.args[0];
+        const fnName = decoded.name;
+        console.log(`   💡 Auto-Deposit intercepted ${fnName}(#${id})`);
 
-      // Determine who needs the deposit
-      let swToDepositFor = op.sender; // Default: the sender of the UserOp
-      if (fnName === "acceptBid") {
-          // In acceptBid, the SUPPLIER is op.sender, but the FINANCIER needs the deposit
-          // We need to find the financier's SmartWallet address
-          swToDepositFor = decoded.args[1]; 
-      }
-
-      // Read invoice details and current deposit
-      const invContract = new ethers.Contract(
-        op.target,
-        [
-          "function invoices(uint256) view returns (uint256,address,address,uint256,uint256,bool,bool,bool,bool,string,address)",
-          "function depositFor(address) payable",
-          "function deposits(address) view returns (uint256)",
-        ],
-        provider
-      );
-
-      const inv = await invContract.invoices(id);
-      const invoiceAmount = inv[3];
-
-      let requiredDeposit;
-      if (fnName === "approveByBuyer") {
-        requiredDeposit = invoiceAmount;
-      } else {
-        requiredDeposit = (invoiceAmount * 90n) / 100n;
-      }
-
-      const currentDeposit = await invContract.deposits(swToDepositFor);
-
-      if (currentDeposit < requiredDeposit) {
-        const needed = requiredDeposit - currentDeposit;
-        
-        // Resolve EOA of the target SmartWallet
-        const targetSW = new ethers.Contract(swToDepositFor, SMART_WALLET_ABI, provider);
-        const ownerAddr = (await targetSW.owner()).toLowerCase();
-
-        const roleName = fnName === "approveByBuyer" ? "Buyer" : "Financier";
-        console.log(`   ⚡ Pulling ${ethers.formatEther(needed)} ETH from ${roleName}'s MetaMask EOA (${ownerAddr})...`);
-
-        const privateKey = PRIVATE_KEYS[ownerAddr];
-        if (privateKey) {
-          const eoaWallet = new ethers.Wallet(privateKey, provider);
-          const depTx = await invContract.connect(eoaWallet).depositFor(swToDepositFor, { value: needed });
-          await depTx.wait();
-          console.log(`   ✅ Deposited ${ethers.formatEther(needed)} ETH from ${roleName}'s EOA → contract deposit`);
-        } else {
-          console.log(`   ⚠️  No private key for ${ownerAddr}, skipping auto-deposit`);
+        let swToDepositFor = op.sender; 
+        if (fnName === "acceptBid") {
+            swToDepositFor = decoded.args[1]; 
         }
-      } else {
-        console.log(`   ✅ Sufficient deposit already (${ethers.formatEther(currentDeposit)} ETH)`);
+
+        const invContract = new ethers.Contract(
+          op.target,
+          ["function invoices(uint256) view returns (uint256,address,address,uint256,uint256,bool,bool,bool,bool,string,address)", "function depositFor(address) payable", "function deposits(address) view returns (uint256)"],
+          provider
+        );
+
+        const inv = await invContract.invoices(id);
+        const invoiceAmount = inv[3];
+        let requiredDeposit = (fnName === "approveByBuyer") ? invoiceAmount : (invoiceAmount * 90n) / 100n;
+
+        const currentDeposit = await invContract.deposits(swToDepositFor);
+
+        if (currentDeposit < requiredDeposit) {
+          const needed = requiredDeposit - currentDeposit;
+          
+          const code = await provider.getCode(swToDepositFor);
+          if (code === "0x") {
+            console.log(`   ⚠️  SmartWallet ${swToDepositFor} not found, skipping deposit`);
+            return;
+          }
+
+          const targetSW = new ethers.Contract(swToDepositFor, SMART_WALLET_ABI, provider);
+          let ownerAddr;
+          try {
+            ownerAddr = (await targetSW.owner()).toLowerCase();
+          } catch (e) {
+            console.log(`   ⚠️  Failed to read owner of ${swToDepositFor}`);
+            return;
+          }
+
+          console.log(`   ⚡ Pulling ${ethers.formatEther(needed)} ETH from EOA (${ownerAddr})...`);
+          const privateKey = PRIVATE_KEYS[ownerAddr];
+          if (privateKey) {
+            const eoaWallet = new ethers.Wallet(privateKey, provider);
+            const depTx = await invContract.connect(eoaWallet).depositFor(swToDepositFor, { value: needed });
+            await depTx.wait();
+            console.log(`   ✅ Deposited ${ethers.formatEther(needed)} ETH`);
+          }
+        }
       }
-    }
-  } catch (_) {
-    // Not an interceptable call — nothing to do
+    })();
+  } catch (e) {
+    console.warn(`   ⚠️  Interceptor failed: ${e.message}`);
   }
   // ────────────────────────────────────────────────────────────────────────────
+
+  // Step 2: Generate Paymaster signature (Oracle)
+  let paymasterData = "0x";
+  if (op.paymaster && op.paymaster !== ethers.ZeroAddress) {
+    paymasterData = await signPaymasterOp(op, nonce);
+    console.log(`   ✅ Signed by Paymaster Oracle (Relayer)`);
+  }
 
   const fullOp = {
     sender:        op.sender,
@@ -260,31 +285,21 @@ async function handleSubmit(op) {
     data:          op.data,
     signature:     signature,
     paymaster:     op.paymaster,
-    paymasterData: op.paymasterData || "0x",
+    paymasterData: paymasterData,
     nonce:         nonce,
   };
 
   try {
     const tx = await bundlerContract.bundleOne(fullOp);
     const receipt = await tx.wait();
-
     console.log(`   ✅ Executed! TX: ${tx.hash}`);
-    console.log(`   ⛽ Gas used: ${receipt.gasUsed.toString()}\n`);
-
     return { txHash: tx.hash, gasUsed: receipt.gasUsed.toString() };
   } catch (err) {
     let revertReason = err.message;
-
-    // Try to decode revert reason from error data
-    if (err.data) {
-       revertReason = `Reverted: ${err.data}`;
-       // Common patterns: 0x08c379a0 (Error(string)), 0x4e487b71 (Panic(uint256))
-       if (err.data.startsWith("0x08c379a0")) {
-          const decoded = ethers.AbiCoder.defaultAbiCoder().decode(["string"], "0x" + err.data.slice(10));
-          revertReason = `Reverted: ${decoded[0]}`;
-       }
+    if (err.data && err.data.startsWith("0x08c379a0")) {
+      const decoded = ethers.AbiCoder.defaultAbiCoder().decode(["string"], "0x" + err.data.slice(10));
+      revertReason = `Reverted: ${decoded[0]}`;
     }
-
     console.error(`   ❌ Revert: ${revertReason}`);
     throw new Error(revertReason);
   }

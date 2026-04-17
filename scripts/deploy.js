@@ -35,7 +35,7 @@ async function main() {
 
   // 2. Paymaster
   const PM = await ethers.getContractFactory("Paymaster");
-  const paymaster = await PM.deploy(entryPoint.target);
+  const paymaster = await PM.deploy(entryPoint.target, owner.address);
   await paymaster.waitForDeployment();
   console.log("✅ Paymaster deployed:     ", paymaster.target);
 
@@ -76,11 +76,7 @@ async function main() {
     const sw = await SW.deploy(eoa, entryPoint.target, paymaster.target);
     await sw.waitForDeployment();
     console.log(`   ✅ ${roleKey} SW: ${sw.target} (Owner: ${eoa.slice(0,8)}...)`);
-    
-    // Whitelist BOTH EOA and SmartWallet
-    await paymaster.connect(owner).addUser(eoa);
-    await paymaster.connect(owner).addUser(sw.target);
-    
+
     deployedSmartWallets[roleKey].push(sw.target);
   }
 

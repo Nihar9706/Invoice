@@ -39,6 +39,8 @@ contract InvoiceContract {
         bool    isPaid;
         string  status;
         address financier;
+        uint256 advanceRate;
+        uint256 interestRate;
     }
 
     uint256 public counter;
@@ -201,7 +203,9 @@ contract InvoiceContract {
             financierFunded:  false,
             isPaid:           false,
             status:           "PENDING",
-            financier:        address(0)
+            financier:        address(0),
+            advanceRate:      0,
+            interestRate:     0
         });
 
         emit InvoiceUploaded(counter, msg.sender, buyer, amount);
@@ -229,13 +233,15 @@ contract InvoiceContract {
     /**
      * @notice Accept a specific bid (called by supplier or backend authorized)
      */
-    function acceptBid(uint256 id, address winningFinancier) external {
+    function acceptBid(uint256 id, address winningFinancier, uint256 _advanceRate, uint256 _interestRate) external {
         Invoice storage inv = invoices[id];
         require(msg.sender == inv.supplier || msg.sender == owner, "Only supplier or owner can accept bids");
         require(keccak256(bytes(inv.status)) == keccak256(bytes("BIDDING")), "Not in bidding status");
         require(inv.escrowLocked, "Escrow must be locked first");
         require(!inv.financierFunded, "Already funded");
 
+        inv.advanceRate  = _advanceRate;
+        inv.interestRate = _interestRate;
         _executeFinancing(id, winningFinancier);
     }
 
@@ -277,6 +283,8 @@ contract InvoiceContract {
         if (!inv.escrowLocked)               revert EscrowNotLocked();
         require(!inv.financierFunded, "Already financed");
 
+        inv.advanceRate  = 90; // Default if manual funded without bidding
+        inv.interestRate = 0;  // Default
         _executeFinancing(id, msg.sender);
     }
 
@@ -314,16 +322,25 @@ contract InvoiceContract {
         inv.isPaid = true;
         inv.status = "PAID";
 
-        // Release the escrowed amount to financier (they get the 10% profit)
-        uint256 financierPayout = escrowBalance[id];
+        uint256 totalEscrow = escrowBalance[id];
         escrowBalance[id] = 0;
 
-        if (financierPayout > 0) {
-            (bool ok, ) = payable(inv.financier).call{value: financierPayout}("");
+        // Financier gets: Investment (Advance) + Profit (Interest)
+        uint256 financierCut = (totalEscrow * (inv.advanceRate + inv.interestRate)) / 100;
+        // Supplier gets: Remainder
+        uint256 supplierCut = totalEscrow - financierCut;
+
+        if (financierCut > 0) {
+            (bool ok, ) = payable(inv.financier).call{value: financierCut}("");
             require(ok, "Financier payout failed");
         }
+        
+        if (supplierCut > 0) {
+            (bool ok, ) = payable(inv.supplier).call{value: supplierCut}("");
+            require(ok, "Supplier remaining payout failed");
+        }
 
-        emit Paid(id, inv.financier, financierPayout);
+        emit Paid(id, inv.financier, financierCut);
     }
 
     // =========================================================================
@@ -414,7 +431,7 @@ contract InvoiceContract {
 
             bool amountOk = fc.maxAutoFundAmount > 0 && inv.amount <= fc.maxAutoFundAmount;
             bool buyerOk  = fc.allowedBuyer == address(0) || fc.allowedBuyer == inv.buyer;
-            bool stillWhitelisted = paymaster.validate(fin);
+            bool stillWhitelisted = isRegisteredFinancier[fin];
             bool hasBalance = deposits[fin] >= (inv.amount * 90) / 100;
             bool isBidding = keccak256(bytes(inv.status)) == keccak256(bytes("BIDDING"));
 
@@ -432,7 +449,10 @@ contract InvoiceContract {
     function _executeFinancing(uint256 id, address fin) internal {
         Invoice storage inv = invoices[id];
 
-        uint256 supplierPayout = (inv.amount * 90) / 100;
+        // If rates haven't been set by bidding/manual fund, use defaults
+        if (inv.advanceRate == 0) inv.advanceRate = 90;
+
+        uint256 supplierPayout = (inv.amount * inv.advanceRate) / 100;
         require(deposits[fin] >= supplierPayout, "Financier has insufficient deposit");
 
         // Deduct from financier's pre-deposited balance
