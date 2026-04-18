@@ -118,7 +118,7 @@ async function init() {
   provider = new ethers.JsonRpcProvider(RPC_URL);
   const relayerKey = PRIVATE_KEYS["0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"];
   const baseWallet = new ethers.Wallet(relayerKey, provider);
-  relayerWallet = new ethers.NonceManager(baseWallet);
+  relayerWallet = baseWallet;
 
   bundlerContract = new ethers.Contract(config.contracts.Bundler, BUNDLER_ABI, relayerWallet);
   entryPointContract = new ethers.Contract(config.contracts.EntryPoint, ENTRYPOINT_ABI, provider);
@@ -234,32 +234,55 @@ async function handleSubmit(op) {
 
         const inv = await invContract.invoices(id);
         const invoiceAmount = inv[3];
-        let requiredDeposit = (fnName === "approveByBuyer") ? invoiceAmount : (invoiceAmount * 90n) / 100n;
+        let requiredDeposit = (invoiceAmount * 90n) / 100n; 
+        if (fnName === "approveByBuyer") {
+          requiredDeposit = invoiceAmount;
+        } else if (fnName === "acceptBid") {
+          const advanceRate = BigInt(decoded.args[2]);
+          requiredDeposit = (invoiceAmount * advanceRate) / 100n;
+        }
 
         const currentDeposit = await invContract.deposits(swToDepositFor);
 
         if (currentDeposit < requiredDeposit) {
           const needed = requiredDeposit - currentDeposit;
-          
-          const code = await provider.getCode(swToDepositFor);
-          if (code === "0x") {
-            console.log(`   ⚠️  SmartWallet ${swToDepositFor} not found, skipping deposit`);
+          if (needed <= 0n) {
+            console.log(`   ✅ Sufficient deposit already exists for ${swToDepositFor} (${ethers.formatEther(currentDeposit)} ETH)`);
             return;
           }
-
-          const targetSW = new ethers.Contract(swToDepositFor, SMART_WALLET_ABI, provider);
+          
+          const code = await provider.getCode(swToDepositFor);
           let ownerAddr;
-          try {
-            ownerAddr = (await targetSW.owner()).toLowerCase();
-          } catch (e) {
-            console.log(`   ⚠️  Failed to read owner of ${swToDepositFor}`);
-            return;
+
+          if (code === "0x") {
+            // It's an EOA, so the owner is the address itself
+            ownerAddr = swToDepositFor.toLowerCase();
+          } else {
+            const targetSW = new ethers.Contract(swToDepositFor, SMART_WALLET_ABI, provider);
+            try {
+              ownerAddr = (await targetSW.owner()).toLowerCase();
+            } catch (e) {
+              console.log(`   ⚠️  Failed to read owner of ${swToDepositFor}`);
+              return;
+            }
           }
 
           console.log(`   ⚡ Pulling ${ethers.formatEther(needed)} ETH from EOA (${ownerAddr})...`);
           const privateKey = PRIVATE_KEYS[ownerAddr];
           if (privateKey) {
             const eoaWallet = new ethers.Wallet(privateKey, provider);
+            
+            // Check EOA ETH balance — if too low, relayer funds it first (Hardhat only convenience)
+            const eoaEthBal = await provider.getBalance(ownerAddr);
+            if (eoaEthBal < needed) {
+              console.log(`   ⛽ EOA ${ownerAddr} low on ETH (${ethers.formatEther(eoaEthBal)}), top-up from Relayer...`);
+              const topUpTx = await relayerWallet.sendTransaction({
+                to: ownerAddr,
+                value: needed - eoaEthBal + ethers.parseEther("1.0") // Send enough + 1 ETH buffer
+              });
+              await topUpTx.wait();
+            }
+
             const depTx = await invContract.connect(eoaWallet).depositFor(swToDepositFor, { value: needed });
             await depTx.wait();
             console.log(`   ✅ Deposited ${ethers.formatEther(needed)} ETH`);

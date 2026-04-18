@@ -357,6 +357,23 @@
     </div>
   </main>
 
+  <!-- ═══ LIFECYCLE MODAL ══════════════════════════════════════════════════ -->
+  <div id="lifecycleModal" class="modal-overlay hidden">
+    <div class="lifecycle-card">
+      <div class="lifecycle-header">
+        <span class="card-title">📋 Invoice Lifecycle</span>
+        <button class="btn btn-sm" onclick="closeLifecycle()">Close</button>
+      </div>
+      <p style="color:var(--text-secondary); font-size:0.85rem; margin-bottom:2rem; opacity:0.7;">
+        Strict lifecycle enforced by Ethereum smart contracts
+      </p>
+      
+      <div class="lifecycle-steps" id="lifecycleSteps">
+        <!-- Steps injected by app.js -->
+      </div>
+    </div>
+  </div>
+
   <!-- ═══ SCRIPTS ══════════════════════════════════════════════════════════ -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.13.4/ethers.umd.min.js"></script>
   <script src="app.js"></script>

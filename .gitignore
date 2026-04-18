@@ -19,3 +19,6 @@ ignition/deployments/chain-31337
 # Local data and logs
 data/
 *.log
+mongodb_data/
+latest_block.json
+all_blocks_summary.txt

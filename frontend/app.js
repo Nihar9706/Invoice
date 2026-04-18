@@ -988,7 +988,7 @@ function renderInvoiceTable(invoices, perspective) {
     }
 
     return `<tr>
-      <td><strong>#${inv.id}</strong></td>
+      <td><strong style="cursor:pointer;color:var(--accent);text-decoration:underline;" onclick="showLifecycle(${inv.id})">#${inv.id}</strong></td>
       <td>${resolveAddr(inv.supplier)}</td>
       <td>${resolveAddr(inv.buyer)}</td>
       <td class="eth-val">${amtEth} ETH</td>
@@ -1713,3 +1713,80 @@ function showToast(msg, type) {
     }
   }
 })();
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  INVOICE LIFECYCLE MODAL
+// ═════════════════════════════════════════════════════════════════════════════
+
+function showLifecycle(id) {
+  const inv = allInvoices.find(i => i.id === id);
+  if (!inv) return showToast("Invoice not found", "error");
+
+  const modal = document.getElementById("lifecycleModal");
+  const container = document.getElementById("lifecycleSteps");
+  const now = Math.floor(Date.now() / 1000);
+
+  const steps = [
+    { label: "Invoice Created", icon: "📤" },
+    { label: "Buyer Verified", icon: "✅" },
+    { label: "Escrow Locked", icon: "🔒" },
+    { label: "Listed for Financing", icon: "💎" },
+    { label: "Finance Approved", icon: "💰" },
+    { label: "Settled (Escrow)", icon: "⚖️" },
+    { label: "Paid (Immutable)", icon: "💸" }
+  ];
+
+  // Logic to determine completeness
+  const stepStatus = steps.map((s, idx) => {
+    let done = false;
+    let current = false;
+
+    switch(idx) {
+      case 0: // Created
+        done = true;
+        break;
+      case 1: // Buyer Verified
+        done = inv.buyerVerified || ["APPROVED", "ESCROWED", "BIDDING", "FINANCED", "PAID"].includes(inv.status);
+        break;
+      case 2: // Escrow Locked
+        done = inv.escrowLocked || ["ESCROWED", "BIDDING", "FINANCED", "PAID"].includes(inv.status);
+        break;
+      case 3: // Bidding / Financing
+        done = inv.status === "BIDDING" || ["FINANCED", "PAID"].includes(inv.status);
+        break;
+      case 4: // Financed
+        done = inv.financierFunded || ["FINANCED", "PAID"].includes(inv.status);
+        break;
+      case 5: // Settled
+        done = (inv.status === "FINANCED" && now >= inv.dueDate) || inv.isPaid || inv.status === "PAID";
+        break;
+      case 6: // Paid
+        done = inv.isPaid || inv.status === "PAID";
+        break;
+    }
+    return { ...s, done };
+  });
+
+  // Find the first non-done step and mark it as current
+  const firstNotDone = stepStatus.findIndex(s => !s.done);
+  if (firstNotDone !== -1) {
+    stepStatus[firstNotDone].current = true;
+  }
+
+  container.innerHTML = stepStatus.map((s, i) => `
+    <div class="step-item ${s.done ? 'done' : ''} ${s.current ? 'current' : ''}">
+      <div class="step-circle">${s.done ? '✓' : (i + 1)}</div>
+      <div class="step-label">${s.label}</div>
+    </div>
+  `).join("");
+
+  modal.classList.remove("hidden");
+}
+
+window.showLifecycle = showLifecycle; // Ensure it's globally accessible
+
+function closeLifecycle() {
+  document.getElementById("lifecycleModal").classList.add("hidden");
+}
+
+window.closeLifecycle = closeLifecycle;
